@@ -1,0 +1,10 @@
+# 기초 이미지 처리 및 수학 연산
+numpy
+opencv-python
+
+# 시각화 및 디버깅 (캘리브레이션 결과 확인용)
+matplotlib
+
+# (선택 사항) 향후 딥러닝 주차선 인식 등을 고려한다면 추가
+# pillow
+# scipy
