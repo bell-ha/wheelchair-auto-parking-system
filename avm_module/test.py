@@ -1,73 +1,96 @@
 import cv2
 import numpy as np
 
-# --- 캔버스 및 기준점 설정 ---
-W, H = 1200, 1200  # 전체 화면 크기
-# 체스판이 고정될 왼쪽 아래 좌표 (여기가 두 영상의 합류 지점이 됩니다)
-FIXED_X, FIXED_Y = 200, 800 
-CELL_SIZE = 250    # 화면에서 체스판이 차지할 크기
+def create_avm_layout_with_dimensions():
+    # 캔버스 및 차량 규격 정의
+    canvas_w, canvas_h = 800, 1000
+    car_w, car_h = 160, 360
 
-pts_l, pts_r = [], []
+    # 캔버스 생성 (배경은 밝은 회색으로)
+    canvas = np.full((canvas_h, canvas_w, 3), 230, dtype=np.uint8)
 
-def mouse_handler(event, x, y, flags, param):
-    pts = param['pts']
-    if event == cv2.EVENT_LBUTTONDOWN and len(pts) < 4:
-        pts.append([x, y])
+    # 차량 영역 좌표 계산
+    car_x1 = (canvas_w - car_w) // 2
+    car_y1 = (canvas_h - car_h) // 2
+    car_x2 = car_x1 + car_w
+    car_y2 = car_y1 + car_h
 
-# 1. 좌표 수집 (순차적 실행)
-for i in [0, 1]:
-    cap = cv2.VideoCapture(i)
-    name = f"CLICK 4 CORNERS - Cam {i}"
-    curr_pts = pts_l if i == 0 else pts_r
-    cv2.namedWindow(name)
-    cv2.setMouseCallback(name, mouse_handler, {'pts': curr_pts})
-    while len(curr_pts) < 4:
-        ret, frame = cap.read()
-        if not ret: break
-        for p in curr_pts: cv2.circle(frame, tuple(p), 5, (0,0,255), -1)
-        cv2.imshow(name, frame)
-        cv2.waitKey(1)
-    cap.release()
-    cv2.destroyWindow(name)
+    # 중앙 차량 영역을 검은색으로 칠하기
+    cv2.rectangle(canvas, (car_x1, car_y1), (car_x2, car_y2), (0, 0, 0), -1)
 
-# 2. 목적지 좌표 설정 (두 카메라 모두 동일한 FIXED 지점으로 매핑)
-# [좌상, 우상, 우하, 좌하] 순서로 클릭한다고 가정
-dst_points = np.float32([
-    [FIXED_X, FIXED_Y],
-    [FIXED_X + CELL_SIZE, FIXED_Y],
-    [FIXED_X + CELL_SIZE, FIXED_Y + CELL_SIZE],
-    [FIXED_X, FIXED_Y + CELL_SIZE]
-])
+    # 텍스트 색상 및 폰트
+    text_color_dim = (100, 100, 100) # 치수 표시용 회색
+    text_color_label = (0, 0, 0)     # 라벨 표시용 검정
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.5
+    thickness = 1
 
-M_l = cv2.getPerspectiveTransform(np.float32(pts_l), dst_points)
-M_r = cv2.getPerspectiveTransform(np.float32(pts_r), dst_points)
+    # ==========================================================
+    # 1. 전체 캔버스 치수 표시
+    # 가로
+    cv2.line(canvas, (0, 10), (canvas_w, 10), text_color_dim, 2)
+    cv2.arrowedLine(canvas, (canvas_w - 50, 10), (canvas_w - 10, 10), text_color_dim, 2, tipLength=0.2)
+    cv2.arrowedLine(canvas, (50, 10), (10, 10), text_color_dim, 2, tipLength=0.2)
+    cv2.putText(canvas, f"{canvas_w} px", (canvas_w // 2 - 30, 30), font, font_scale, text_color_dim, thickness)
 
-# 3. 실시간 합성 실행
-cap0, cap1 = cv2.VideoCapture(0), cv2.VideoCapture(1)
+    # 세로
+    cv2.line(canvas, (10, 0), (10, canvas_h), text_color_dim, 2)
+    cv2.arrowedLine(canvas, (10, canvas_h - 50), (10, canvas_h - 10), text_color_dim, 2, tipLength=0.2)
+    cv2.arrowedLine(canvas, (10, 50), (10, 10), text_color_dim, 2, tipLength=0.2)
+    cv2.putText(canvas, f"{canvas_h} px", (20, canvas_h // 2), font, font_scale, text_color_dim, thickness)
 
-while True:
-    ret0, frame0 = cap0.read()
-    ret1, frame1 = cap1.read()
-    if not ret0 or not ret1: break
+    # ==========================================================
+    # 2. 중앙 차량 영역 치수 표시
+    # 차량 가로
+    cv2.line(canvas, (car_x1, car_y1 - 10), (car_x2, car_y1 - 10), text_color_dim, 1)
+    cv2.arrowedLine(canvas, (car_x2 - 30, car_y1 - 10), (car_x2 - 10, car_y1 - 10), text_color_dim, 1, tipLength=0.2)
+    cv2.arrowedLine(canvas, (car_x1 + 30, car_y1 - 10), (car_x1 + 10, car_y1 - 10), text_color_dim, 1, tipLength=0.2)
+    cv2.putText(canvas, f"{car_w} px", (car_x1 + car_w // 2 - 20, car_y1 - 20), font, font_scale, text_color_dim, thickness)
 
-    # 전체 화면 왜곡 (잘리는 부분 없이 캔버스 크기만큼 출력)
-    warped_l = cv2.warpPerspective(frame0, M_l, (W, H))
-    warped_r = cv2.warpPerspective(frame1, M_r, (W, H))
+    # 차량 세로
+    cv2.line(canvas, (car_x1 - 10, car_y1), (car_x1 - 10, car_y2), text_color_dim, 1)
+    cv2.arrowedLine(canvas, (car_x1 - 10, car_y2 - 30), (car_x1 - 10, car_y2 - 10), text_color_dim, 1, tipLength=0.2)
+    cv2.arrowedLine(canvas, (car_x1 - 10, car_y1 + 30), (car_x1 - 10, car_y1 + 10), text_color_dim, 1, tipLength=0.2)
+    cv2.putText(canvas, f"{car_h} px", (car_x1 - 40, car_y1 + car_h // 2 + 10), font, font_scale, text_color_dim, thickness)
 
-    # 두 영상을 합침 (체스판 위치가 동일하므로 정확히 정렬됨)
-    # 0이 아닌 부분을 우선시하여 합성
-    combined = np.where(warped_r == 0, warped_l, warped_r)
-    # 혹은 반투명하게 겹침을 보려면 아래 코드 사용
-    # combined = cv2.addWeighted(warped_l, 0.5, warped_r, 0.5, 0)
+    # ==========================================================
+    # 3. 각 카메라 가용 영역 치수 표시 (여백)
+    # 상단 여백 (전방)
+    cv2.line(canvas, (canvas_w // 2 + 10, 0), (canvas_w // 2 + 10, car_y1), text_color_dim, 1)
+    cv2.arrowedLine(canvas, (canvas_w // 2 + 10, car_y1 - 30), (canvas_w // 2 + 10, car_y1 - 10), text_color_dim, 1, tipLength=0.2)
+    cv2.arrowedLine(canvas, (canvas_w // 2 + 10, 30), (canvas_w // 2 + 10, 10), text_color_dim, 1, tipLength=0.2)
+    cv2.putText(canvas, f"{car_y1} px", (canvas_w // 2 + 20, car_y1 // 2 + 10), font, font_scale, text_color_dim, thickness)
 
-    # 화면에 기준점 가이드 표시 (확인용)
-    cv2.rectangle(combined, (FIXED_X, FIXED_Y), (FIXED_X+CELL_SIZE, FIXED_Y+CELL_SIZE), (0, 255, 0), 2)
-    cv2.putText(combined, "FIXED POINT (CHECKERBOARD)", (FIXED_X, FIXED_Y-10), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+    # 하단 여백 (후방)
+    cv2.line(canvas, (canvas_w // 2 + 10, car_y2), (canvas_w // 2 + 10, canvas_h), text_color_dim, 1)
+    cv2.arrowedLine(canvas, (canvas_w // 2 + 10, canvas_h - 30), (canvas_w // 2 + 10, canvas_h - 10), text_color_dim, 1, tipLength=0.2)
+    cv2.arrowedLine(canvas, (canvas_w // 2 + 10, car_y2 + 30), (canvas_w // 2 + 10, car_y2 + 10), text_color_dim, 1, tipLength=0.2)
+    cv2.putText(canvas, f"{canvas_h - car_y2} px", (canvas_w // 2 + 20, car_y2 + (canvas_h - car_y2) // 2 + 10), font, font_scale, text_color_dim, thickness)
+    
+    # 좌측 여백
+    cv2.line(canvas, (0, canvas_h // 2 + 10), (car_x1, canvas_h // 2 + 10), text_color_dim, 1)
+    cv2.arrowedLine(canvas, (car_x1 - 30, canvas_h // 2 + 10), (car_x1 - 10, canvas_h // 2 + 10), text_color_dim, 1, tipLength=0.2)
+    cv2.arrowedLine(canvas, (30, canvas_h // 2 + 10), (10, canvas_h // 2 + 10), text_color_dim, 1, tipLength=0.2)
+    cv2.putText(canvas, f"{car_x1} px", (car_x1 // 2 - 20, canvas_h // 2 + 30), font, font_scale, text_color_dim, thickness)
 
-    cv2.imshow("Unified AVM - Fixed Alignment", combined)
-    if cv2.waitKey(1) & 0xFF == ord('q'): break
+    # 우측 여백
+    cv2.line(canvas, (car_x2, canvas_h // 2 + 10), (canvas_w, canvas_h // 2 + 10), text_color_dim, 1)
+    cv2.arrowedLine(canvas, (canvas_w - 30, canvas_h // 2 + 10), (canvas_w - 10, canvas_h // 2 + 10), text_color_dim, 1, tipLength=0.2)
+    cv2.arrowedLine(canvas, (car_x2 + 30, canvas_h // 2 + 10), (car_x2 + 10, canvas_h // 2 + 10), text_color_dim, 1, tipLength=0.2)
+    cv2.putText(canvas, f"{canvas_w - car_x2} px", (car_x2 + (canvas_w - car_x2) // 2 - 20, canvas_h // 2 + 30), font, font_scale, text_color_dim, thickness)
 
-cap0.release()
-cap1.release()
-cv2.destroyAllWindows()
+    # ==========================================================
+    # 4. 주요 라벨 표시
+    cv2.putText(canvas, "EGO VEHICLE", (car_x1 + 10, car_y1 + car_h // 2 + 5), font, 0.6, (255, 255, 255), 2)
+    cv2.putText(canvas, "FRONT VIEW", (canvas_w // 2 - 50, car_y1 - 50), font, 0.7, text_color_label, 2)
+    cv2.putText(canvas, "REAR VIEW", (canvas_w // 2 - 40, car_y2 + 70), font, 0.7, text_color_label, 2)
+    cv2.putText(canvas, "LEFT SIDE", (car_x1 - 100, canvas_h // 2 + 10), font, 0.7, text_color_label, 2)
+    cv2.putText(canvas, "RIGHT SIDE", (car_x2 + 20, canvas_h // 2 + 10), font, 0.7, text_color_label, 2)
+
+    return canvas
+
+if __name__ == "__main__":
+    avm_layout = create_avm_layout_with_dimensions()
+    cv2.imshow("AVM Layout with Dimensions", avm_layout)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
