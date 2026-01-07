@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 
 # 1. 렌즈 보정 데이터 로드
-data = np.load('data/calib_result_common.npz')
+data = np.load('data/calib_result.npz')
 K, D, new_K = data['mtx'], data['dist'], data['new_mtx']
 
 # 2. 캔버스 규격

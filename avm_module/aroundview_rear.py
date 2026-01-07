@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import os
 
-data = np.load('data/calib_result_common.npz')
+data = np.load('data/calib_result.npz')
 map1, map2 = cv2.fisheye.initUndistortRectifyMap(data['mtx'], data['dist'], np.eye(3), data['new_mtx'], (1280, 720), cv2.CV_16SC2)
 
 DST_PTS = np.float32([[320, 680], [480, 680], [480, 1000], [320, 1000], [0, 680], [800, 680], [0, 1000], [800, 1000]])
