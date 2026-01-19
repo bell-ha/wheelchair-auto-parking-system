@@ -12,3 +12,15 @@ calibrate.py
 
 
 7. 어라운드 뷰 만들기
+main.py #캔버스 구성
+aroundview_left.py #왼쪽 어라운드뷰 만들기
+aroundview_rear.py #뒷쪽 어라운드 뷰 만들기
+
+- 영상 촬영
+record.py
+
+- 촬영된 영상에서 아르코마커 찾기
+record_video_aruco_detection.py
+
+- 일반 카메라에서 아르코마커 찾기(성능 제일 좋음)
+aruco_detection.py

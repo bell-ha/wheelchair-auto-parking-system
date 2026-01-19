@@ -2,70 +2,113 @@ import cv2
 import numpy as np
 import os
 
+# --- [1. 모든 아르코 마커 대응 검출기 설정] ---
+def get_universal_detector():
+    # 이미지의 마커는 6x6으로 보입니다. 범용성을 위해 6x6_250을 기본으로 설정합니다.
+    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
+    parameters = cv2.aruco.DetectorParameters()
+    
+    # 왜곡되거나 작은 마커를 더 잘 잡기 위한 파라미터 튜닝
+    parameters.adaptiveThreshWinSizeMin = 3
+    parameters.adaptiveThreshWinSizeMax = 23
+    parameters.minMarkerPerimeterRate = 0.02
+    
+    return cv2.aruco.ArucoDetector(aruco_dict, parameters)
+
+detector = get_universal_detector()
+
 def draw_base_layout():
-    # 800x1000 캔버스 (검정색 배경)
-    canvas = np.zeros((1000, 800, 3), dtype=np.uint8)
-    # 차량 본체 (중앙 하단 배치)
-    cv2.rectangle(canvas, (320, 320), (480, 680), (40, 40, 40), -1)
+    canvas = np.zeros((720, 600, 3), dtype=np.uint8)
+    cv2.rectangle(canvas, (200, 180), (400, 540), (40, 40, 40), -1)
     return canvas
 
 def create_panorama_mask():
-    """좌측과 후방이 만나는 코너 구역에 부드러운 그라데이션 마스크 생성"""
-    mask = np.zeros((1000, 800), dtype=np.float32)
-    # 겹치는 핵심 구역: 좌측 하단 (0, 680) ~ (320, 1000)
-    # 이 구역을 대각선으로 나누어 투명도 그라데이션을 만듭니다.
-    for y in range(680, 1000):
-        for x in range(0, 320):
-            # 대각선 거리 기반 가중치 계산 (파노라마 스티칭 원리)
-            dist = (320 - x) + (y - 680)
-            val = np.clip(dist / 640, 0, 1) # 0~1 사이로 정규화
+    mask = np.zeros((720, 600), dtype=np.float32)
+    for y in range(540, 720):
+        for x in range(0, 200):
+            dist = (200 - x) + (y - 540)
+            val = np.clip(dist / 380, 0, 1) 
             mask[y, x] = val
     return np.expand_dims(mask, axis=2)
 
+# --- [2. 개별 이미지에서 마커를 찾고 처리하는 함수] ---
+def process_camera_frame(file_name):
+    if not os.path.exists(file_name):
+        return None
+    
+    img = cv2.imread(file_name)
+    if img is None: return None
+
+    # 중요: uint8(BGR) 상태에서 마커 검출 수행
+    corners, ids, rejected = detector.detectMarkers(img)
+    if ids is not None:
+        # 마커 테두리 및 ID 화면에 그리기
+        cv2.aruco.drawDetectedMarkers(img, corners, ids)
+    
+    # 합성 규격에 맞게 리사이즈 후 float 변환
+    img_res = cv2.resize(img, (600, 720))
+    return img_res.astype(np.float32) / 255.0
+
 def main():
-    print("🌟 REAL-TIME PANORAMA STITCHING START...")
+    print("🌟 AVM SYSTEM: Marker Detection & Synthesis START")
     blend_mask = create_panorama_mask()
     
     while True:
-        canvas = draw_base_layout().astype(np.float32) / 255.0
+        # 기본 캔버스 준비
+        base_canvas = draw_base_layout()
         
-        # 1. 파일 로드
-        left_exists = os.path.exists("left_result.jpg")
-        rear_exists = os.path.exists("rear_result.jpg")
-        
-        l_img = cv2.imread("left_result.jpg").astype(np.float32)/255.0 if left_exists else None
-        r_img = cv2.imread("rear_result.jpg").astype(np.float32)/255.0 if rear_exists else None
+        # 각 카메라 이미지 처리 (마커 감지 포함)
+        l_img_f = process_camera_frame("left_result.jpg")
+        r_img_f = process_camera_frame("rear_result.jpg")
 
-        # 2. 파노라마 합성 로직
-        if l_img is not None and r_img is not None:
-            # 기본 베이스 합성
-            result = np.zeros_like(canvas)
-            
-            # 후방과 겹치지 않는 좌측 상단 영역
-            result[0:680, 0:320] = l_img[0:680, 0:320]
-            # 좌측과 겹치지 않는 후방 우측 영역
-            result[680:1000, 320:800] = r_img[680:1000, 320:800]
-            
-            # [핵심] 겹치는 코너 구역 (0:320, 680:1000) 스티칭
-            # blend_mask를 이용해 두 영상을 부드럽게 섞음
-            corner_l = l_img[680:1000, 0:320]
-            corner_r = r_img[680:1000, 0:320]
-            stitched_corner = corner_l * blend_mask[680:1000, 0:320] + \
-                              corner_r * (1 - blend_mask[680:1000, 0:320])
-            
-            result[680:1000, 0:320] = stitched_corner
-            canvas = result
-            
-        elif l_img is not None: # 좌측만 있을 때
-            canvas[0:1000, 0:320] = l_img[0:1000, 0:320]
-        elif r_img is not None: # 후방만 있을 때
-            canvas[680:1000, 0:800] = r_img[680:1000, 0:800]
-
-        # 3. 차량 이미지 및 가이드라인 마감
-        cv2.rectangle(canvas, (320, 320), (480, 680), (0.1, 0.1, 0.1), -1)
-        cv2.putText(canvas, "FRONT", (370, 310), 1, 1, (1,1,1), 1)
+        canvas_f = base_canvas.astype(np.float32) / 255.0
         
-        cv2.imshow("AVM PANORAMA VIEW", (canvas * 255).astype(np.uint8))
+        # 합성 로직
+        if l_img_f is not None and r_img_f is not None:
+            result = np.zeros_like(canvas_f)
+            # 좌측 영역 배치
+            result[0:540, 0:200] = l_img_f[0:540, 0:200]
+            # 후방 영역 배치
+            result[540:720, 200:600] = r_img_f[540:720, 200:600]
+            
+            # 코너 블렌딩 (스티칭)
+            corner_l = l_img_f[540:720, 0:200]
+            corner_r = r_img_f[540:720, 0:200]
+            stitched = corner_l * blend_mask[540:720, 0:200] + \
+                       corner_r * (1.0 - blend_mask[540:720, 0:200])
+            result[540:720, 0:200] = stitched
+            canvas_f = result
+            
+        elif l_img_f is not None:
+            canvas_f[0:720, 0:200] = l_img_f[0:720, 0:200]
+        elif r_img_f is not None:
+            canvas_f[540:720, 0:600] = r_img_f[540:720, 0:600]
+
+        # 최종 출력을 위해 다시 uint8로 변환
+        final_view = (canvas_f * 255).astype(np.uint8)
+
+        # --- [3. UI 오버레이 및 좌표 표시] ---
+        # 차량 내부 사각형
+        cv2.rectangle(final_view, (200, 180), (400, 540), (25, 25, 25), -1)
+        cv2.putText(final_view, "FRONT", (275, 170), 1, 1.2, (255, 255, 255), 1)
+
+        # 기존 초록색 좌표 점들 표시
+        pts = [
+            (0, 0), (600, 0), (0, 720), (600, 720),
+            (200, 180), (400, 180), (200, 540), (400, 540),
+            (200, 0), (400, 0), (0, 540), (600, 540)
+        ]
+        for pt in pts:
+            cv2.circle(final_view, pt, 4, (0, 255, 0), -1)
+            cv2.putText(final_view, f"{pt}", (pt[0] + 5, pt[1] - 5), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 0), 1)
+
+        # 가이드라인 표시
+        cv2.line(final_view, (200, 0), (200, 720), (100, 100, 100), 1)
+        cv2.line(final_view, (400, 0), (400, 720), (100, 100, 100), 1)
+        cv2.line(final_view, (0, 540), (600, 540), (100, 100, 100), 1)
+
+        cv2.imshow("AVM Universal Monitor", final_view)
         if cv2.waitKey(10) & 0xFF == ord('q'): break
 
     cv2.destroyAllWindows()
