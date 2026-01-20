@@ -1,109 +1,237 @@
 import cv2
 import numpy as np
-import os
+import math
+import time
 
-# --- [설정] 마커 정보 및 카메라 파라미터 ---
-MARKER_SIZE = 25.0  # 실제 마커 크기 (cm)
-
-# 광각 카메라를 위한 임의의 캘리브레이션 값
-camera_matrix = np.array([[800, 0, 640],
-                          [0, 800, 360],
-                          [0, 0, 1]], dtype=np.float32)
-dist_coeffs = np.zeros((4, 1)) 
-
-def get_aruco_detector():
-    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_250)
-    parameters = cv2.aruco.DetectorParameters()
-    parameters.polygonalApproxAccuracyRate = 0.05
-    return cv2.aruco.ArucoDetector(aruco_dict, parameters)
-
-def estimate_pose(frame, corners, ids):
-    if ids is not None:
-        for i in range(len(ids)):
-            # 마커의 3D 좌표 정의
-            obj_points = np.array([[-MARKER_SIZE/2,  MARKER_SIZE/2, 0],
-                                   [ MARKER_SIZE/2,  MARKER_SIZE/2, 0],
-                                   [ MARKER_SIZE/2, -MARKER_SIZE/2, 0],
-                                   [-MARKER_SIZE/2, -MARKER_SIZE/2, 0]], dtype=np.float32)
-            
-            # PnP 알고리즘 수행
-            _, rvec, tvec = cv2.solvePnP(obj_points, corners[i], camera_matrix, dist_coeffs)
-            
-            # --- [에러 수정 포인트] 거리 계산 방식 변경 ---
-            # np.linalg.norm은 벡터의 크기(L2 norm)를 계산해줍니다. 인덱스 에러로부터 안전합니다.
-            distance = np.linalg.norm(tvec)
-            
-            # 각도(Yaw) 계산
-            rmat, _ = cv2.Rodrigues(rvec)
-            yaw = np.arctan2(rmat[1, 0], rmat[0, 0]) * 180 / np.pi
-            
-            # 화면에 정보 표시
-            cv2.aruco.drawDetectedMarkers(frame, [corners[i]], ids[i])
-            # 마커의 좌측 상단 모서리 좌표 추출
-            c = corners[i][0][0].astype(int) 
-            
-            # 가독성을 위해 텍스트 배경 처리 또는 선명한 색상 사용
-            text = f"D: {distance:.1f}cm, Y: {yaw:.1f}deg"
-            cv2.putText(frame, text, (c[0], c[1] - 15), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-    return frame
-
-def analyze_dual_videos(left_path, rear_path):
-    cap_l = cv2.VideoCapture(left_path)
-    cap_r = cv2.VideoCapture(rear_path)
-    
-    if not cap_l.isOpened() or not cap_r.isOpened():
-        print("⚠️ 파일을 열 수 없습니다. data/ 폴더에 left.mp4와 rear.mp4가 있는지 확인하세요.")
-        return
-
-    fps = cap_l.get(cv2.CAP_PROP_FPS)
-    w_l, h_l = int(cap_l.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap_l.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    w_r, h_r = int(cap_r.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap_r.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    h_min = min(h_l, h_r)
-    total_w = int(w_l * h_min / h_l) + int(w_r * h_min / h_r)
-    
-    output_path = "data/detected_pose_combined.mp4"
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_path, fourcc, fps, (total_w, h_min))
-
-    detector = get_aruco_detector()
-    print(f"🔍 거리/각도 분석 시작: {output_path} 저장 중...")
-
-    while True:
-        ret_l, frame_l = cap_l.read()
-        ret_r, frame_r = cap_r.read()
-
-        if not ret_l or not ret_r:
-            break
-
-        # 포즈 추정 수행
-        corners_l, ids_l, _ = detector.detectMarkers(frame_l)
-        estimate_pose(frame_l, corners_l, ids_l)
-
-        corners_r, ids_r, _ = detector.detectMarkers(frame_r)
-        estimate_pose(frame_r, corners_r, ids_r)
-
-        # 화면 합치기
-        f_l_res = cv2.resize(frame_l, (int(w_l * h_min / h_l), h_min))
-        f_r_res = cv2.resize(frame_r, (int(w_r * h_min / h_r), h_min))
-        combined = cv2.hconcat([f_l_res, f_r_res])
-
-        out.write(combined)
+class DualCamArucoLocalizer:
+    def __init__(self):
+        # 1. 제원 및 카메라 파라미터 설정
+        self.marker_size = 0.25
+        self.orig_w = 1280
+        self.orig_h = 720
         
-        # 확인용 출력
-        display_scale = 1280 / combined.shape[1]
-        display_frame = cv2.resize(combined, (0, 0), fx=display_scale, fy=display_scale)
-        cv2.imshow("Dual Pose Analysis", display_frame)
+        # 광각 170도 렌즈 초점거리 계산
+        fov_rad = math.radians(167)
+        self.focal_length = (self.orig_w / 2) / math.tan(fov_rad / 2)
+        
+        # 카메라별 설치 파라미터 (기존 설정 유지)
+        self.cam_configs = {
+            'left': {
+                'offset': [1.3, 0.6],
+                'height': 1.15,
+                'pitch': math.radians(42),
+                'yaw': math.radians(-95)
+            },
+            'back': {
+                'offset': [0.0, -1.8],
+                'height': 0.85,
+                'pitch': math.radians(40),
+                'yaw': math.radians(180)
+            }
+        }
+        
+        # 2. 영상 파일 초기화
+        self.cap_left = cv2.VideoCapture('data/left.mp4')
+        self.cap_back = cv2.VideoCapture('data/rear.mp4')
+        
+        # 3. ArUco 설정
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_50)
+        # OpenCV 버전에 따른 디텍터 설정
+        try:
+            self.params = cv2.aruco.DetectorParameters()
+            self.detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.params)
+            self.is_new_version = True
+        except AttributeError:
+            self.detector = None
+            self.params = cv2.aruco.DetectorParameters_create()
+            self.is_new_version = False
+        
+        # 4. 상태 변수
+        self.rel_pos = None
+        self.wheelchair_yaw = 0.0
+        self.last_active_cam = "None"
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+    def process_frame(self, frame, cam_side):
+        """개별 프레임 처리 로직"""
+        if frame is None:
+            return None, None
+            
+        target_idx = -1
+        current_marker_id = -1
+        detection_result = None
+        display_frame = frame.copy()
+        
+        if self.is_new_version:
+            corners, ids, _ = self.detector.detectMarkers(frame)
+        else:
+            corners, ids, _ = cv2.aruco.detectMarkers(frame, self.aruco_dict, parameters=self.params)
+        
+        if ids is not None:
+            detected_ids = ids.flatten()
+            if 0 in detected_ids:
+                target_idx = np.where(detected_ids == 0)[0][0]
+                current_marker_id = 0
+            elif 1 in detected_ids:
+                target_idx = np.where(detected_ids == 1)[0][0]
+                current_marker_id = 1
+            
+            if target_idx != -1:
+                camera_matrix = np.array([
+                    [self.focal_length, 0, self.orig_w / 2],
+                    [0, self.focal_length, self.orig_h / 2],
+                    [0, 0, 1]
+                ], dtype=np.float32)
+                
+                hs = self.marker_size / 2
+                obj_points = np.array([[-hs, hs, 0], [hs, hs, 0], [hs, -hs, 0], [-hs, -hs, 0]], dtype=np.float32)
+                
+                success, rvec, tvec = cv2.solvePnP(obj_points, corners[target_idx][0].astype(np.float32), 
+                                                   camera_matrix, np.zeros((5,1)))
 
-    cap_l.release()
-    cap_r.release()
-    out.release()
-    cv2.destroyAllWindows()
-    print(f"✅ 분석 완료: {output_path}")
+                if success:
+                    tx, ty, tz = tvec.flatten()
+                    config = self.cam_configs[cam_side]
+                    p, cy = config['pitch'], config['yaw']
+                    
+                    ground_z = tz * math.cos(p) - ty * math.sin(p)
+                    ground_x = tx
+                    
+                    # 회전 및 부호 보정
+                    vx_tmp = ground_x * math.cos(cy) - ground_z * math.sin(cy)
+                    vy_tmp = ground_x * math.sin(cy) + ground_z * math.cos(cy)
+                    
+                    if cam_side == 'left':
+                        vx, vy = vx_tmp, -vy_tmp # 잘 되었던 코드 로직
+                    else:
+                        vx, vy = -vx_tmp, vy_tmp
 
-if __name__ == "__main__":
-    analyze_dual_videos("data/left.mp4", "data/rear.mp4")
+                    rel_pos = [vx + config['offset'][0], vy + config['offset'][1]]
+
+                    # Yaw 계산
+                    rmat, _ = cv2.Rodrigues(rvec)
+                    yaw_cam = math.atan2(rmat[0, 2], rmat[2, 2])
+                    if current_marker_id == 1: yaw_cam += math.pi
+
+                    if cam_side == 'left':
+                        w_yaw = yaw_cam + cy - (math.pi / 2)
+                    else:
+                        w_yaw = yaw_cam + cy
+
+                    w_yaw = math.atan2(math.sin(w_yaw), math.cos(w_yaw))
+
+                    detection_result = {'pos': rel_pos, 'yaw': w_yaw}
+                    
+                    # 프레임에 축 그리기
+                    cv2.drawFrameAxes(display_frame, camera_matrix, np.zeros((5,1)), rvec, tvec, 0.2)
+
+        return display_frame, detection_result
+
+    def draw_mini_map(self):
+        """통합 미니맵 시각화 (카메라 위치 L, B 표시 포함)"""
+        m_size = 600
+        mini_map = np.ones((m_size, m_size, 3), dtype=np.uint8) * 30
+        center = m_size // 2
+        scale = 40  # 1m 당 40픽셀
+        
+        # 1. 그리드 선 (1m 간격)
+        grid_step = 40
+        for i in range(0, m_size, grid_step):
+            cv2.line(mini_map, (i, 0), (i, m_size), (50, 50, 50), 1)
+            cv2.line(mini_map, (0, i), (m_size, i), (50, 50, 50), 1)
+        
+        # 2. 차량 본체 (회색 직사각형)
+        # 실제 차량 크기에 맞춰 조정 가능 (예: 가로 0.7m, 세로 1m 가정)
+        cv2.rectangle(mini_map, (center - 30, center - 72), (center + 30, center + 72), (100, 100, 100), -1)
+        
+        ramp_top = center + 72
+        ramp_bottom = ramp_top + 72
+        cv2.rectangle(mini_map, (center - 30, ramp_top), (center + 30, ramp_bottom), (200, 150, 0), 2)
+        # 경사로임을 알리기 위한 빗금 또는 텍스트 추가 (선택 사항)
+        cv2.putText(mini_map, "RAMP", (center - 20, ramp_top + 40), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 150, 0), 1)
+        
+        # 3. 카메라 설치 위치 표시
+        for cam_side, config in self.cam_configs.items():
+            # 차량 좌표계 offset을 미니맵 좌표로 변환
+            # offset[0]은 X(좌우), offset[1]은 Y(전후)
+            cam_x = center - int(config['offset'][0] * scale)
+            cam_y = center - int(config['offset'][1] * scale)
+            
+            if cam_side == 'left':
+                color = (255, 0, 0)  # 파란색 (Left)
+                label = "L"
+            else:
+                color = (0, 0, 255)  # 빨간색 (Back)
+                label = "B"
+                
+            cv2.circle(mini_map, (cam_x, cam_y), 6, color, -1)
+            cv2.putText(mini_map, label, (cam_x + 10, cam_y - 10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+        # 4. 휠체어 현재 위치 및 방향 표시
+        if self.rel_pos:
+            wx = center - int(self.rel_pos[0] * scale)
+            wy = center - int(self.rel_pos[1] * scale)
+            
+            # 휠체어 본체 (초록색)
+            cv2.circle(mini_map, (wx, wy), 12, (0, 255, 0), -1)
+            
+            # 방향 화살표
+            arrow_len = 35
+            ax = int(wx - arrow_len * math.sin(self.wheelchair_yaw))
+            ay = int(wy - arrow_len * math.cos(self.wheelchair_yaw))
+            cv2.arrowedLine(mini_map, (wx, wy), (ax, ay), (255, 255, 255), 3, tipLength=0.3)
+            
+            # 현재 위치 좌표 출력
+            pos_text = f"Pos: [{self.rel_pos[0]:.2f}, {self.rel_pos[1]:.2f}]m"
+            cv2.putText(mini_map, pos_text, (wx + 15, wy + 15), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+        # 5. 상태 표시
+        cv2.putText(mini_map, f"Active: {self.last_active_cam}", (10, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        cv2.imshow("Integrated Mini-Map", mini_map)
+
+    def run(self):
+        """메인 실행 루프 (rclpy.spin 대체)"""
+        print("프로그램 시작 (종료하려면 'q'를 누르세요)")
+        
+        while True:
+            ret_l, frame_l = self.cap_left.read()
+            ret_b, frame_b = self.cap_back.read()
+            
+            # 영상 반복 재생 설정
+            if not ret_l:
+                self.cap_left.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                continue
+            if not ret_b:
+                self.cap_back.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                continue
+
+            # 프레임 처리
+            disp_l, res_l = self.process_frame(frame_l, 'left')
+            disp_b, res_b = self.process_frame(frame_b, 'back')
+
+            if res_l:
+                self.rel_pos, self.wheelchair_yaw, self.last_active_cam = res_l['pos'], res_l['yaw'], "Left"
+            if res_b:
+                self.rel_pos, self.wheelchair_yaw, self.last_active_cam = res_b['pos'], res_b['yaw'], "Back"
+
+            # 화면 출력
+            if disp_l is not None: cv2.imshow("Left Camera", cv2.resize(disp_l, (640, 360)))
+            if disp_b is not None: cv2.imshow("Back Camera", cv2.resize(disp_b, (640, 360)))
+            
+            self.draw_mini_map()
+
+            # 키 입력 대기 (약 20 FPS 유지)
+            if cv2.waitKey(30) & 0xFF == ord('q'):
+                break
+
+        self.cap_left.release()
+        self.cap_back.release()
+        cv2.destroyAllWindows()
+
+if __name__ == '__main__':
+    localizer = DualCamArucoLocalizer()
+    localizer.run()
