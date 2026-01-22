@@ -4,7 +4,7 @@ import numpy as np
 # ===============================
 # 설정
 # ===============================
-IMAGE_PATH = "calib_rear.jpg"   # calib_left.jpg 로 바꿔도 됨
+IMAGE_PATH = "capture_.png"   # calib_left.jpg 로 바꿔도 됨
 WINDOW_NAME = "POINT PICKER (GRID)"
 
 GRID_X = 64    # 세로 격자 간격
