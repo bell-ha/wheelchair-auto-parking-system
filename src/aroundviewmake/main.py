@@ -10,9 +10,9 @@ W, H = 600, 720
 # ===============================
 # 경로 설정
 # ===============================
-LEFT_IMG_PATH = "left_result.jpg"
-REAR_IMG_PATH = "rear_result.jpg"
-OUT_PATH = "avm_final_smooth.jpg"
+LEFT_IMG_PATH = "data/left_result.jpg"
+REAR_IMG_PATH = "data/rear_result.jpg"
+OUT_PATH = "data/avm_final_smooth.jpg"
 
 # ===============================
 # 마스크 영역 정의 (Polygon)
