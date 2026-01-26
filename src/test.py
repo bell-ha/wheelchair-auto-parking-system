@@ -1,58 +1,55 @@
 import cv2
-import numpy as np
-import os
 
-def apply_calibration_to_file():
-    # 1. 경로 설정
-    input_path = 'test/rear.jpg'
-    calib_path = 'data/calib_rear.npz'
-    output_path = 'test/rear_calibrated.jpg'
-
-    # 2. 이미지 로드
-    if not os.path.exists(input_path):
-        print(f"❌ 파일을 찾을 수 없습니다: {input_path}")
-        return
+def show_dense_grid_camera(cam_idx=0):
+    cap = cv2.VideoCapture(cam_idx)
     
-    img = cv2.imread(input_path)
-    h, w = img.shape[:2]
-
-    # 3. 보정 데이터(npz) 로드 및 맵 생성
-    if not os.path.exists(calib_path):
-        print(f"❌ 보정 파일이 없습니다: {calib_path}")
+    if not cap.isOpened():
+        print(f"카메라 {cam_idx}번을 열 수 없습니다.")
         return
 
-    try:
-        data = np.load(calib_path)
-        # 사용자의 fisheye 보정 로직 그대로 적용
-        map1, map2 = cv2.fisheye.initUndistortRectifyMap(
-            data['mtx'], 
-            data['dist'], 
-            np.eye(3), 
-            data['new_mtx'], 
-            (w, h), 
-            cv2.CV_16SC2
-        )
-        print(f"✅ {calib_path} 보정 데이터 로드 완료.")
+    # 해상도 확인
+    ret, frame = cap.read()
+    if not ret: return
+    h, w, _ = frame.shape
 
-        # 4. 왜곡 보정(Remap) 수행
-        calibrated_img = cv2.remap(img, map1, map2, cv2.INTER_LINEAR)
+    while True:
+        ret, frame = cap.read()
+        if not ret: break
 
-        # 5. 결과 저장 및 시각화
-        cv2.imwrite(output_path, calibrated_img)
-        print(f"📸 보정 완료! 저장 경로: {output_path}")
+        # 1. 매우 촘촘한 보조선 (50픽셀 단위, 아주 연하게)
+        for x in range(0, w, 50):
+            cv2.line(frame, (x, 0), (x, h), (60, 60, 60), 1)
+        for y in range(0, h, 50):
+            cv2.line(frame, (0, y), (w, y), (60, 60, 60), 1)
 
-        # 화면에 비교 출력 (결과 확인용)
-        res_orig = cv2.resize(img, (640, 360))
-        res_calib = cv2.resize(calibrated_img, (640, 360))
-        comparison = np.hstack((res_orig, res_calib))
-        
-        cv2.imshow("Result (Left: RAW / Right: Calibrated)", comparison)
-        print("⌨️ 아무 키나 누르면 종료됩니다.")
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+        # 2. 메인 격자 (100픽셀 단위, 조금 더 진하게)
+        for x in range(0, w, 100):
+            cv2.line(frame, (x, 0), (x, h), (100, 100, 100), 1)
+        for y in range(0, h, 100):
+            cv2.line(frame, (0, y), (w, y), (100, 100, 100), 1)
 
-    except Exception as e:
-        print(f"❌ 오류 발생: {e}")
+        # 3. 화면 8등분 가이드라인 (노란색)
+        for i in range(1, 8):
+            dx = int(w * i / 8)
+            dy = int(h * i / 8)
+            cv2.line(frame, (dx, 0), (dx, h), (0, 255, 255), 1)
+            cv2.line(frame, (0, dy), (w, dy), (0, 255, 255), 1)
+
+        # 4. 정중앙 십자선 (빨간색, 굵게)
+        cv2.line(frame, (int(w/2), 0), (int(w/2), h), (0, 0, 255), 2)
+        cv2.line(frame, (0, int(h/2)), (w, int(h/2)), (0, 0, 255), 2)
+
+        # 현재 상태 표시
+        cv2.putText(frame, f"REAR/SIDE CAM: {w}x{h}", (10, h - 20), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+        cv2.imshow("High-Precision Alignment Grid", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    apply_calibration_to_file()
+    show_dense_grid_camera(0)

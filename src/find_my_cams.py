@@ -1,3 +1,4 @@
+#카메라 찾는 코드
 import cv2
 
 def test_all_cameras():

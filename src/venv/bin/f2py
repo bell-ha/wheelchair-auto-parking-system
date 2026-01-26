@@ -1,4 +1,4 @@
-#!/Users/jongha/Desktop/GitHub/wheelchair-auto-parking-system/avm_module/venv/bin/python3.11
+#!/Users/jongha/Desktop/GitHub/wheelchair-auto-parking-system/src/venv/bin/python3.14
 import sys
 from numpy.f2py.f2py2e import main
 if __name__ == '__main__':
