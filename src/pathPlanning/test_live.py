@@ -23,14 +23,22 @@ class FinalOptimizedTracker:
         self.col_p1, self.col_p2, self.col_area = (255, 120, 0), (0, 150, 255), (0, 255, 255)
         self.marker_pos, self.heading_angle, self.is_initialized = None, 0.0, False 
 
-        # [추가] 상태 변수
+        # 상태 변수
         self.lost_frames = 0
-        self.nav_mode = 0 # 0: Park, 1: Out
-        self.last_rotate_sig = "R" # 유실 시 탐색 방향
+        self.nav_mode = 0 
+        self.last_rotate_sig = "R"
 
-        self.cap0 = cv2.VideoCapture('../wheelchairdetect/rear.mp4')
-        self.cap1 = cv2.VideoCapture('../wheelchairdetect/left.mp4')
-        self.total_frames = int(min(self.cap0.get(cv2.CAP_PROP_FRAME_COUNT), self.cap1.get(cv2.CAP_PROP_FRAME_COUNT)))
+        # 실제 카메라 연동 (0번: Rear, 1번: Left)
+        self.cap0 = cv2.VideoCapture(0)
+        self.cap1 = cv2.VideoCapture(1)
+        
+        for cap in [self.cap0, self.cap1]:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 360)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            cap.set(cv2.CAP_PROP_FPS, 30)
+
+        self.curr_f0, self.curr_f1 = None, None
         
         self.cams = {
             'cam1': { 'pos': np.array([200.0 + self.off_x, 270.0 + self.off_y]), 'h': 110.0, 'focal': 841.0, 'map_angle': 157, 'yaw': 1.0, 'fov': 45, 'color': (255, 120, 100), 'name': 'Left' },
@@ -43,16 +51,9 @@ class FinalOptimizedTracker:
         self.win_name = "Integrated UI Wheelchair Tracker"
         cv2.namedWindow(self.win_name)
         cv2.setMouseCallback(self.win_name, self.on_mouse_click)
-        
-        # [추가] 모드 설정 게이지 (0: 주차, 1: 출차)
         cv2.createTrackbar("Mode(0:P, 1:O)", self.win_name, 0, 1, self.on_mode_change)
-        cv2.createTrackbar("Frame", self.win_name, 278, self.total_frames - 1, self.on_frame_change)
-        self.on_frame_change(278)
 
     def on_mode_change(self, v): self.nav_mode = v
-    def on_frame_change(self, v):
-        self.cap0.set(cv2.CAP_PROP_POS_FRAMES, v); self.cap1.set(cv2.CAP_PROP_POS_FRAMES, v)
-        _, self.curr_f0 = self.cap0.read(); _, self.curr_f1 = self.cap1.read()
 
     def on_mouse_click(self, event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN: self.user_obstacles.append((x, y, 25))
@@ -134,7 +135,6 @@ class FinalOptimizedTracker:
         cv2.putText(img, f"{label}: {yaw_err:+.1f}deg", (int(pivot[0])+60, int(pivot[1])+offset_y), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
         
-        # [신호 생성] 각도가 5도 이상이면 L/R 우선, 아니면 F
         if abs(yaw_err) > 5.0:
             sig = "R" if yaw_err > 0 else "L"
             self.last_rotate_sig = sig
@@ -142,25 +142,30 @@ class FinalOptimizedTracker:
         return "F" if math.dist(pivot, target) > 20 else "S"
 
     def run(self):
-        play = False
         while True:
-            if play:
-                ret0, self.curr_f0 = self.cap0.read(); ret1, self.curr_f1 = self.cap1.read()
-                if not ret0 or not ret1: self.on_frame_change(0); continue
-                cv2.setTrackbarPos("Frame", self.win_name, int(self.cap0.get(cv2.CAP_PROP_POS_FRAMES)))
+            ret0, self.curr_f0 = self.cap0.read()
+            ret1, self.curr_f1 = self.cap1.read()
+            
+            if not ret0 or not ret1:
+                print("카메라 연결 실패")
+                break
 
             m_map = np.ones((self.map_h, self.map_w, 3), dtype=np.uint8) * 12
             self.draw_static_map(m_map)
-            mon0, mon1 = (f.copy() if f is not None else np.zeros((360,640,3),np.uint8) for f in [self.curr_f0, self.curr_f1])
+            
+            # 모니터링용 복사본 (이 위에 마커 표시를 그립니다)
+            mon0, mon1 = self.curr_f0.copy(), self.curr_f1.copy()
             
             detected_data = []
             is_cam0, is_cam1 = False, False
 
             # 1. 마커 감지 로직
             for frame, mon, side in [(self.curr_f0, mon0, 'cam0'), (self.curr_f1, mon1, 'cam1')]:
-                if frame is None: continue
                 corners, ids, _ = self.detector.detectMarkers(frame)
                 if ids is not None:
+                    # [추가] 마커 감지 시 화면에 사각형 및 ID 표시
+                    cv2.aruco.drawDetectedMarkers(mon, corners, ids)
+                    
                     if side == 'cam0': is_cam0 = True
                     if side == 'cam1': is_cam1 = True
                     cfg = self.cams[side]
@@ -198,11 +203,10 @@ class FinalOptimizedTracker:
                     current_sig = self.last_rotate_sig
                     cv2.putText(m_map, f"LOST - SEARCHING... SIGNAL: [{current_sig}]", (40, 60), 0, 0.7, (0, 150, 255), 2)
                 else:
-                    # [로직 적용]
                     if self.nav_mode == 0: # Park 모드
-                        if is_cam1 and not is_cam0: # Left만 보이면 Area로 유도 (Rear를 보기 위함)
+                        if is_cam1 and not is_cam0: 
                             current_sig = self.draw_path_ui(m_map, self.astar_plan(center, self.area_goal), self.col_area, "GO TO REAR AREA", pivot, 10)
-                        else: # Rear가 보이면 주차 수행
+                        else: 
                             s1 = self.draw_path_ui(m_map, self.astar_plan(center, self.p1), self.col_p1, "P1", pivot, -40) if is_cam1 else "S"
                             s2 = self.draw_path_ui(m_map, self.astar_plan(center, self.p2), self.col_p2, "P2", pivot, -15) if is_cam0 else "S"
                             current_sig = s2 if is_cam0 else s1
@@ -211,7 +215,6 @@ class FinalOptimizedTracker:
                     
                     cv2.putText(m_map, f"SIGNAL: [{current_sig}]", (40, 110), 0, 1.2, (255, 255, 255), 3)
 
-                # 휠체어 렌더링 (원본 유지)
                 w, l = (self.wc_w*self.map_scale)/2, (self.wc_l*self.map_scale)/2
                 rot_m = np.array([[math.cos(self.heading_angle),-math.sin(self.heading_angle)],[math.sin(self.heading_angle),math.cos(self.heading_angle)]])
                 pts = np.dot(np.array([[-l,-w],[l,-w],[l,w],[-l,w]]), rot_m.T) + center
@@ -220,10 +223,11 @@ class FinalOptimizedTracker:
                 cv2.arrowedLine(m_map, tuple(pivot.astype(int)), (int(pivot[0] + 45*math.cos(self.heading_angle)), int(pivot[1] + 45*math.sin(self.heading_angle))), (255,255,255), 2)
 
             cv2.imshow(self.win_name, m_map)
+            # mon1, mon0를 합쳐서 보여줄 때 마커 사각형이 표시된 이미지를 사용합니다.
             cv2.imshow("Monitor", np.hstack([cv2.resize(mon1, (640, 360)), cv2.resize(mon0, (640, 360))]))
-            key = cv2.waitKey(30) & 0xFF
-            if key == ord(' '): play = not play
-            elif key == ord('q'): break
+            
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'): break
 
         self.cap0.release(); self.cap1.release(); cv2.destroyAllWindows()
 
