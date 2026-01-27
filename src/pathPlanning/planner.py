@@ -66,36 +66,88 @@ class FinalOptimizedTracker:
         # 다단계 목표 설정
         car_rear_y = self.car_y + self.car_dim[1] + 150
         
-        self.goal_stages = [
-            # Stage 0: 초기 목표 2개 중 가까운 곳
+        # 주차/출차 모드 설정
+        self.parking_mode = True  # True: 주차, False: 출차
+        self.user_exit_choice = None  # 출차 시 사용자 선택 (0 또는 1)
+        
+        # 출차용 추가 목표 2개
+        exit_goal_y = self.off_y + 400  # 출차 최종 목표 Y 위치
+        self.exit_final_goals = [
+            {'pos': (car_center_x + 250, exit_goal_y), 'angle': None},  # 출차 목표 1
+            {'pos': (car_center_x - 250, exit_goal_y), 'angle': None}   # 출차 목표 2
+        ]
+        
+        # 주차 시나리오
+        self.parking_stages = [
+            # Stage 0: 초기 접근
             {
                 'positions': [
-                    {'pos': (car_center_x + 240, car_rear_y), 'angle': None},  # G1 (우측)
-                    {'pos': (car_center_x - 240, car_rear_y), 'angle': None}   # G2 (좌측)
+                    {'pos': (car_center_x + 240, car_rear_y), 'angle': None},
+                    {'pos': (car_center_x - 240, car_rear_y), 'angle': None}
                 ],
                 'select_nearest': True,
-                'name': 'Initial Approach',
-                'use_planning': True  # A* 사용
+                'name': 'Parking: Initial Approach',
+                'use_planning': True,
+                'consider_angle': False
             },
-            # Stage 1: 제3의 목표
+            # Stage 1: 정렬
             {
                 'positions': [
-                    {'pos': (car_center_x, car_rear_y - 70), 'angle': math.radians(-90)}  # 차량 정면, 90도 각도
+                    {'pos': (car_center_x, car_rear_y - 70), 'angle': math.radians(-90)}
                 ],
                 'select_nearest': False,
-                'name': 'Front Alignment',
-                'use_planning': True  # A* 사용
+                'name': 'Parking: Front Alignment',
+                'use_planning': True,
+                'consider_angle': True
             },
-            # Stage 2: 제4의 목표 (최종)
+            # Stage 2: 최종 진입
             {
                 'positions': [
-                    {'pos': (car_center_x, car_rear_y + 100), 'angle': math.radians(-90)}  # 램프 앞, 90도 각도
+                    {'pos': (car_center_x, car_rear_y + 100), 'angle': math.radians(-90)}
                 ],
                 'select_nearest': False,
-                'name': 'Final Position',
-                'use_planning': False  # 직선 후진만
+                'name': 'Parking: Final Position',
+                'use_planning': False,
+                'consider_angle': True
             }
         ]
+        
+        # 출차 시나리오
+        self.exit_stages = [
+            # Stage 0: 후진 출발 (주차 S2 위치에서 시작)
+            {
+                'positions': [
+                    {'pos': (car_center_x, car_rear_y + 80), 'angle': math.radians(-90)}
+                ],
+                'select_nearest': False,
+                'name': 'Exit: Reverse Start',
+                'use_planning': False,
+                'consider_angle': True
+            },
+            # Stage 1: 사용자 선택 대기 (주차 S0 위치 중 선택)
+            {
+                'positions': [
+                    {'pos': (car_center_x + 250, car_rear_y), 'angle': None},
+                    {'pos': (car_center_x - 250, car_rear_y), 'angle': None}
+                ],
+                'select_nearest': True,  # 가까운 쪽 자동 선택
+                'name': 'Exit: Position Selection',
+                'use_planning': True,
+                'consider_angle': False,
+                'wait_for_user': True  # 사용자 선택 대기
+            },
+            # Stage 2: 최종 출차 목표 (사용자가 선택한 방향)
+            {
+                'positions': [],  # 동적으로 채워짐
+                'select_nearest': False,
+                'name': 'Exit: Final Destination',
+                'use_planning': True,
+                'consider_angle': True
+            }
+        ]
+        
+        # 현재 활성 시나리오
+        self.goal_stages = self.parking_stages if self.parking_mode else self.exit_stages
         
         self.current_stage = 0
         self.current_goal_idx = 0
@@ -110,13 +162,8 @@ class FinalOptimizedTracker:
         cv2.namedWindow(self.win_name)
         
         cv2.createTrackbar("Frame", self.win_name, 278, self.total_frames - 1, self.on_frame_change)
-        cv2.createTrackbar("L_Focal", self.win_name, 841, 1500, lambda v: self.upd('cam1','focal',v))
-        cv2.createTrackbar("L_Yaw", self.win_name, 91, 180, lambda v: self.upd('cam1','yaw',v-90))
-        cv2.createTrackbar("R_Focal", self.win_name, 836, 1500, lambda v: self.upd('cam0','focal',v))
-        cv2.createTrackbar("R_Yaw", self.win_name, 91, 180, lambda v: self.upd('cam0','yaw',v-90))
-        cv2.createTrackbar("Dist_Gain", self.win_name, 103, 200, self.on_dist_gain)
-        cv2.createTrackbar("Smooth", self.win_name, 75, 100, self.on_alpha)
-        cv2.createTrackbar("Plan", self.win_name, 1, 1, self.on_plan_toggle)
+        cv2.createTrackbar("Mode", self.win_name, 1, 1, self.on_mode_change)  # 1=주차, 0=출차
+        cv2.createTrackbar("ExitChoice", self.win_name, 0, 1, self.on_exit_choice)  # 출차 방향 선택
 
         self.on_frame_change(278)
 
@@ -126,16 +173,77 @@ class FinalOptimizedTracker:
         _, self.curr_f0 = self.cap0.read()
         _, self.curr_f1 = self.cap1.read()
 
-    def on_alpha(self, v): self.alpha = max(0.01, v / 100.0)
-    def on_dist_gain(self, v): self.dist_gain = v / 100.0
-    def upd(self, side, key, val): self.cams[side][key] = float(val)
-    
-    def on_plan_toggle(self, v):
-        self.planning_enabled = (v == 1)
-        if self.planning_enabled and self.marker_pos is not None:
-            self.update_path()
+    def on_mode_change(self, v):
+        """주차/출차 모드 전환"""
+        self.parking_mode = (v == 1)
+        self.goal_stages = self.parking_stages if self.parking_mode else self.exit_stages
+        self.current_stage = 0
+        self.current_goal_idx = 0
+        self.initial_goal_selected = False
+        self.path = []
+        print(f"🔄 모드 변경: {'주차' if self.parking_mode else '출차'}")
+
+    def on_exit_choice(self, v):
+        """출차 방향 선택"""
+        self.user_exit_choice = v
+        direction = "왼쪽" if v == 0 else "오른쪽"
+        print(f"🎯 출차 방향 선택: {direction}")
+        
+        # Stage 2의 목표를 사용자 선택에 따라 즉시 변경
+        if not self.parking_mode:
+            self.exit_stages[2]['positions'] = [self.exit_final_goals[v]]
+            
+            # Stage 1에 있다면 목표 재선택
+            if self.current_stage == 1:
+                self.select_exit_waypoint()
+            
+            # 경로 재계획
+            if self.current_stage >= 1:
+                self.update_path()
+
+    def select_exit_waypoint(self):
+        """출차 모드 Stage 1: 최종 목표와 가까운 경유지 선택"""
+        if self.parking_mode or self.current_stage != 1:
+            return
+        
+        stage = self.exit_stages[1]
+        final_goal = self.exit_final_goals[self.user_exit_choice]['pos']
+        
+        # 각 경유지에서 최종 목표까지의 거리 계산
+        min_dist = float('inf')
+        nearest_idx = 0
+        
+        for i, waypoint_info in enumerate(stage['positions']):
+            waypoint = waypoint_info['pos']
+            dist = math.sqrt((final_goal[0] - waypoint[0])**2 + (final_goal[1] - waypoint[1])**2)
+            if dist < min_dist:
+                min_dist = dist
+                nearest_idx = i
+        
+        if nearest_idx != self.current_goal_idx:
+            self.current_goal_idx = nearest_idx
+            side = "우측" if nearest_idx == 0 else "좌측"
+
+    def advance_stage(self):
+        """다음 단계로 진행"""
+        stage = self.goal_stages[self.current_stage]
+        
+        if self.current_goal_idx < len(stage['positions']) - 1:
+            self.current_goal_idx += 1
+            print(f"🎯 목표 변경: Stage {self.current_stage} - Goal {self.current_goal_idx + 1}")
+        elif self.current_stage < len(self.goal_stages) - 1:
+            self.current_stage += 1
+            self.current_goal_idx = 0
+            print(f"✅ Stage {self.current_stage - 1} 완료! → {self.goal_stages[self.current_stage]['name']}")
+            
+            # 출차 모드 Stage 1 진입 시 경유지 선택
+            if not self.parking_mode and self.current_stage == 1:
+                self.select_exit_waypoint()
         else:
-            self.path = []
+            mode_name = "주차" if self.parking_mode else "출차"
+            print(f"🎉 {mode_name} 완료!")
+            return False
+        return True
 
     def is_obstacle(self, px, py):
         """장애물 체크"""
@@ -406,6 +514,26 @@ class FinalOptimizedTracker:
                     ay = int(gp[1] + arrow_len * math.sin(angle))
                     cv2.arrowedLine(img, gp, (ax, ay), (150, 150, 255), 2, tipLength=0.4)
 
+        # 출차 모드일 때 최종 목표 후보들도 표시
+        if not self.parking_mode:
+            for i, goal_info in enumerate(self.exit_final_goals):
+                goal = goal_info['pos']
+                gp = (int(goal[0]), int(goal[1]))
+                
+                # 선택된 목표 강조
+                is_selected = (self.user_exit_choice == i)
+                color = (255, 100, 0) if is_selected else (80, 80, 80)
+                
+                cv2.circle(img, gp, 8, color, -1 if is_selected else 2)
+                cv2.putText(img, f"Exit{i+1}", (gp[0]-20, gp[1]-15), 0, 0.4, color, 1, cv2.LINE_AA)
+                
+                if goal_info['angle'] is not None:
+                    angle = goal_info['angle']
+                    arrow_len = 20
+                    ax = int(gp[0] + arrow_len * math.cos(angle))
+                    ay = int(gp[1] + arrow_len * math.sin(angle))
+                    cv2.arrowedLine(img, gp, (ax, ay), color, 2, tipLength=0.4)
+
     def draw_path(self, img):
         if len(self.path) < 2: return
         for i in range(len(self.path) - 1):
@@ -495,8 +623,8 @@ class FinalOptimizedTracker:
                 if self.planning_enabled:
                     center_pos = self.marker_pos + np.array([(self.wc_l/2)*self.map_scale*math.cos(self.heading_angle), (self.wc_l/2)*self.map_scale*math.sin(self.heading_angle)])
                     
-                    # Stage 0에서만 가까운 목표 선택
-                    if self.current_stage == 0:
+                    # 주차 모드 Stage 0에서만 현재 위치 기준 선택
+                    if self.parking_mode and self.current_stage == 0:
                         self.select_nearest_goal(center_pos)
                     
                     # 목표 도달 확인
