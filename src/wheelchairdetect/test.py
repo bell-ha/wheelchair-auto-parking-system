@@ -4,14 +4,13 @@ import math
 
 class FinalOptimizedTracker:
     def __init__(self):
-        # 1. 물리 및 지도 설정
+        # 1. 물리 및 지도 설정 (원본 유지)
         self.marker_size = 25.0
         self.marker_h = 72.0        
         self.map_w, self.map_h = 1000, 1000 
         self.grid_w, self.grid_h = 600, 720 
         self.map_scale = 0.5 
         self.off_x, self.off_y = 200, 150
-
         self.wc_w, self.wc_l = 57.0, 100.0           
         
         self.marker_pos = None     
@@ -26,6 +25,7 @@ class FinalOptimizedTracker:
         self.curr_f0 = None
         self.curr_f1 = None
 
+        # 카메라 설정 (원본 수치 유지)
         self.cams = {
             'cam1': { 
                 'pos': np.array([200.0 + self.off_x, 270.0 + self.off_y]), 
@@ -72,6 +72,7 @@ class FinalOptimizedTracker:
     def upd(self, side, key, val): self.cams[side][key] = float(val)
 
     def draw_static_map(self, img):
+        # 맵 그리기 로직 (원본 보존)
         step = int(20 * self.map_scale * 2) 
         for x in range(0, self.grid_w + 1, step):
             c = (45, 45, 45) if x % 100 != 0 else (80, 80, 80)
@@ -113,31 +114,30 @@ class FinalOptimizedTracker:
                     cv2.aruco.drawDetectedMarkers(mon_frame, corners, ids)
                     cfg = self.cams[side]
                     c = corners[0].reshape(4, 2)
+                    
+                    # 거리 및 위치 계산 (원본 수식 보존)
                     px_h = (np.linalg.norm(c[0]-c[3]) + np.linalg.norm(c[1]-c[2])) / 2.0
                     raw_dist = (self.marker_size * cfg['focal']) / px_h
                     corr_dist = raw_dist * (1 + (self.dist_gain - 1) * (raw_dist / 500)) 
                     d = math.sqrt(max(0, corr_dist**2 - abs(cfg['h'] - self.marker_h)**2))
                     
-                    # 수평 각도 계산 (Yaw)
                     rel_x = (np.mean(c[:, 0]) - frame.shape[1]/2) / (frame.shape[1]/2)
-                    m_yaw_deg = (rel_x * cfg['fov']) * self.angle_gain # 카메라 정면 기준 마커의 편차 각도
-                    
+                    m_yaw_deg = (rel_x * cfg['fov']) * self.angle_gain
                     t_rad = math.radians(cfg['map_angle'] + cfg['yaw'] + m_yaw_deg)
                     raw_pos = cfg['pos'] + np.array([d * self.map_scale * math.cos(t_rad), d * self.map_scale * math.sin(t_rad)])
                     
+                    # 각도 계산 (원본 수식 보존)
                     marker_vec = c[0] - c[3]
                     h = t_rad + math.atan2(marker_vec[1], marker_vec[0]) - (math.pi/2)
                     if ids[0][0] == 1: h += math.pi 
                     
-                    detected_data.append((raw_pos, h, d, t_rad))
+                    detected_data.append((raw_pos, h, d, t_rad, m_yaw_deg))
 
-                    # [시각화 추가] 거리 호, 연결선, 그리고 Yaw값 표시
+                    # 맵 시각화 (원본 보존)
                     cp, rp = tuple(cfg['pos'].astype(int)), tuple(raw_pos.astype(int))
                     dist_px = int(d * self.map_scale)
                     cv2.ellipse(m_map, cp, (dist_px, dist_px), 0, math.degrees(t_rad)-5, math.degrees(t_rad)+5, cfg['color'], 2, cv2.LINE_AA)
                     cv2.line(m_map, cp, rp, cfg['color'], 1, cv2.LINE_AA)
-                    
-                    # 거리와 Yaw값을 연결선 중간에 표시
                     txt_pos = ((cp[0]+rp[0])//2, (cp[1]+rp[1])//2)
                     cv2.putText(m_map, f"{d:.0f}cm / {m_yaw_deg:+.1f}deg", (txt_pos[0]+5, txt_pos[1]-5), 0, 0.4, (180, 180, 180), 1, cv2.LINE_AA)
 
@@ -146,14 +146,23 @@ class FinalOptimizedTracker:
                 avg_h = math.atan2(np.mean([math.sin(p[1]) for p in detected_data]), np.mean([math.cos(p[1]) for p in detected_data]))
                 
                 if play and self.is_initialized:
+                    # [추가된 각도 가드 로직]
+                    # 이전 각도와 너무 차이가 크면(노이즈), 반영 속도를 늦추거나 무시함
+                    diff = (avg_h - self.heading_angle + math.pi) % (2 * math.pi) - math.pi
+                    if abs(diff) > math.radians(50): # 50도 이상 갑자기 튀는 경우
+                        actual_alpha = self.alpha * 0.1 # 부드러움을 더 극대화하여 튐 억제
+                    else:
+                        actual_alpha = self.alpha
+                    
                     self.marker_pos = self.marker_pos * (1 - self.alpha) + avg_pos * self.alpha
-                    self.heading_angle = math.atan2(math.sin(self.heading_angle)*(1-self.alpha) + math.sin(avg_h)*self.alpha, 
-                                                    math.cos(self.heading_angle)*(1-self.alpha) + math.cos(avg_h)*self.alpha)
+                    self.heading_angle = math.atan2(math.sin(self.heading_angle)*(1-actual_alpha) + math.sin(avg_h)*actual_alpha, 
+                                                    math.cos(self.heading_angle)*(1-actual_alpha) + math.cos(avg_h)*actual_alpha)
                 else:
                     self.marker_pos, self.heading_angle = avg_pos, avg_h
                     self.is_initialized = True
 
             if self.is_initialized:
+                # 휠체어 렌더링 (원본 보존)
                 offset_dist = (self.wc_l / 2) * self.map_scale
                 center_pos = self.marker_pos + np.array([offset_dist * math.cos(self.heading_angle), offset_dist * math.sin(self.heading_angle)])
                 w_px, l_px = (self.wc_w * self.map_scale) / 2, (self.wc_l * self.map_scale) / 2
@@ -168,9 +177,12 @@ class FinalOptimizedTracker:
                 cv2.arrowedLine(m_map, tuple(center_pos.astype(int)), (int(center_pos[0] + 45 * math.cos(self.heading_angle)), int(center_pos[1] + 45 * math.sin(self.heading_angle))), (255, 255, 255), 2)
 
             cv2.imshow(self.win_name, m_map)
-            cv2.imshow("Monitor", np.hstack([cv2.resize(mon0, (640, 360)), cv2.resize(mon1, (640, 360))]))
+            # 모니터 출력 화면이 None일 경우 예외 처리
+            m0_res = cv2.resize(mon0, (640, 360)) if mon0 is not None else np.zeros((360, 640, 3), np.uint8)
+            m1_res = cv2.resize(mon1, (640, 360)) if mon1 is not None else np.zeros((360, 640, 3), np.uint8)
+            cv2.imshow("Monitor", np.hstack([m0_res, m1_res]))
             
-            key = cv2.waitKey(80) & 0xFF
+            key = cv2.waitKey(30) & 0xFF
             if key == ord(' '): play = not play
             elif key == ord('q'): break
 
