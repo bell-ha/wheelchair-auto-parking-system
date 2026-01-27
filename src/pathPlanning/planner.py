@@ -161,13 +161,43 @@ class FinalOptimizedTracker:
             right = self.simplify_path(path[index:], epsilon)
             return left[:-1] + right
         return [path[0], path[-1]]
-
+    
+    def can_see_goal(self, start, goal):
+        """시작점에서 목표점까지 직선 상에 장애물이 있는지 체크"""
+        steps = 20  # 경로를 20개 지점으로 나누어 검사
+        for i in range(steps + 1):
+            t = i / steps
+            curr_x = start[0] * (1 - t) + goal[0] * t
+            curr_y = start[1] * (1 - t) + goal[1] * t
+            if self.is_obstacle(curr_x, curr_y):
+                return False
+        return True
+    
     def astar_plan(self, start, goal):
-        def heuristic(a, b):
-            return math.sqrt((a[0] - b[0])**2 + (a[1] - b[1])**2) * 1.8
+        # 헬퍼 함수: 시작점과 끝점 사이에 장애물이 있는지 체크 (직선 가시성)
+        def can_see_goal(s, g):
+            steps = 20
+            for i in range(steps + 1):
+                t = i / steps
+                curr_x = s[0] * (1 - t) + g[0] * t
+                curr_y = s[1] * (1 - t) + g[1] * t
+                if self.is_obstacle(curr_x, curr_y):
+                    return False
+            return True
+
         start_node = (int(start[0]), int(start[1]))
         goal_node = (int(goal[0]), int(goal[1]))
+
+        # [수정 핵심] 직선상에 장애물이 없다면 A* 계산 없이 즉시 직선 경로 반환
+        if can_see_goal(start_node, goal_node):
+            return [list(start_node), list(goal_node)]
+
         if self.is_obstacle(start_node[0], start_node[1]): return []
+        
+        # 장애물이 있을 때만 수행되는 기존 A* 로직
+        def heuristic(a, b):
+            return math.sqrt((a[0] - b[0])**2 + (a[1] - b[1])**2) * 1.8
+            
         open_list = []
         heapq.heappush(open_list, (0, start_node, (0, 0)))
         came_from = {}
@@ -176,18 +206,19 @@ class FinalOptimizedTracker:
 
         while open_list:
             _, current, prev_dir = heapq.heappop(open_list)
+            # 도착 판정 거리 (조금 넉넉하게 15px)
             if math.sqrt((current[0]-goal_node[0])**2 + (current[1]-goal_node[1])**2) < 15:
                 raw_path = []
-                while current in came_from:
-                    raw_path.append([current[0], current[1]])
-                    current = came_from[current]
+                temp_curr = current
+                while temp_curr in came_from:
+                    raw_path.append([temp_curr[0], temp_curr[1]])
+                    temp_curr = came_from[temp_curr]
                 raw_path.reverse()
                 return self.simplify_path(raw_path, epsilon=5.0)
 
-            for dx, dy in [(0,3),(0,-3),(3,0),(-3,0),(2,2),(2,-2),(-2,2),(-2,-2)]:
+            for dx, dy in [(0,5),(0,-5),(5,0),(-5,0),(4,4),(4,-4),(-4,4),(-4,-4)]:
                 neighbor = (current[0] + dx, current[1] + dy)
-                if not (0 <= neighbor[0] < self.map_w and 0 <= neighbor[1] < self.map_h): 
-                    continue
+                if not (0 <= neighbor[0] < self.map_w and 0 <= neighbor[1] < self.map_h): continue
                 if self.is_obstacle(neighbor[0], neighbor[1]): continue
 
                 move_dist = math.sqrt(dx**2 + dy**2)
@@ -278,25 +309,31 @@ class FinalOptimizedTracker:
 
     def update_path(self):
         if self.marker_pos is None or not self.is_initialized: return
-        offset_dist = (self.wc_l / 2) * self.map_scale
-        center_pos = self.marker_pos + np.array([offset_dist * math.cos(self.heading_angle), offset_dist * math.sin(self.heading_angle)])
         
-        # Stage 2에서는 경로 계획 없이 직선 후진
+        # 휠체어의 중심점(회전축에서 앞쪽으로 offset) 계산
+        offset_dist = (self.wc_l / 2) * self.map_scale
+        center_pos = self.marker_pos + np.array([
+            offset_dist * math.cos(self.heading_angle), 
+            offset_dist * math.sin(self.heading_angle)
+        ])
+        
+        start = (int(center_pos[0]), int(center_pos[1]))
+        current_goal = self.get_current_goal()
+        goal_pos = current_goal['pos']
+
+        # Stage 2: 강제 직선 (후진/진입 구간)
         if self.current_stage == 2:
-            current_goal = self.get_current_goal()
-            # 현재 위치에서 목표까지 직선 경로만 생성
-            self.path = [
-                [int(center_pos[0]), int(center_pos[1])],
-                [int(current_goal['pos'][0]), int(current_goal['pos'][1])]
-            ]
+            self.path = [[start[0], start[1]], [int(goal_pos[0]), int(goal_pos[1])]]
             return
         
-        # Stage 0, 1은 기존 A* 경로 계획
-        current_goal = self.get_current_goal()
-        start = (int(center_pos[0]), int(center_pos[1]))
-        new_path = self.astar_plan(start, current_goal['pos'])
-        if new_path: 
+        # Stage 0, 1: 가시성 기반 A* (장애물 없으면 직선, 있으면 우회)
+        new_path = self.astar_plan(start, goal_pos)
+        
+        if new_path:
             self.path = new_path
+        else:
+            # 경로를 찾지 못한 경우(장애물에 갇힘 등) 최소한 목적지 방향이라도 표시
+            self.path = [[start[0], start[1]], [int(goal_pos[0]), int(goal_pos[1])]]
 
     def draw_static_map(self, img):
         # 배경 그리드 (전체 맵)
