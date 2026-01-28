@@ -4,7 +4,7 @@ import math
 
 class FinalOptimizedTracker:
     def __init__(self):
-        # 1. 물리 및 지도 설정 (원본 유지)
+        # 1. 물리 및 지도 설정 (원본 그대로 유지)
         self.marker_size = 25.0
         self.marker_h = 72.0        
         self.map_w, self.map_h = 1000, 1000 
@@ -51,6 +51,7 @@ class FinalOptimizedTracker:
         self.win_name = "Integrated Wheelchair Tracker"
         cv2.namedWindow(self.win_name)
         
+        # [복구] 모든 트랙바 기능 원상복구
         cv2.createTrackbar("Frame", self.win_name, 278, self.total_frames - 1, self.on_frame_change)
         cv2.createTrackbar("L_Focal", self.win_name, 841, 1500, lambda v: self.upd('cam1','focal',v))
         cv2.createTrackbar("L_Yaw", self.win_name, 91, 180, lambda v: self.upd('cam1','yaw',v-90))
@@ -72,7 +73,6 @@ class FinalOptimizedTracker:
     def upd(self, side, key, val): self.cams[side][key] = float(val)
 
     def draw_static_map(self, img):
-        # 맵 그리기 로직 (원본 보존)
         step = int(20 * self.map_scale * 2) 
         for x in range(0, self.grid_w + 1, step):
             c = (45, 45, 45) if x % 100 != 0 else (80, 80, 80)
@@ -103,7 +103,7 @@ class FinalOptimizedTracker:
             m_map = np.ones((self.map_h, self.map_w, 3), dtype=np.uint8) * 15
             self.draw_static_map(m_map)
             
-            detected_data = []
+            detected_data = [] # (pos, h, weight) 형태로 저장
             mon0 = self.curr_f0.copy() if self.curr_f0 is not None else None
             mon1 = self.curr_f1.copy() if self.curr_f1 is not None else None
 
@@ -114,55 +114,53 @@ class FinalOptimizedTracker:
                     cv2.aruco.drawDetectedMarkers(mon_frame, corners, ids)
                     cfg = self.cams[side]
                     c = corners[0].reshape(4, 2)
-                    
-                    # 거리 및 위치 계산 (원본 수식 보존)
                     px_h = (np.linalg.norm(c[0]-c[3]) + np.linalg.norm(c[1]-c[2])) / 2.0
                     raw_dist = (self.marker_size * cfg['focal']) / px_h
                     corr_dist = raw_dist * (1 + (self.dist_gain - 1) * (raw_dist / 500)) 
                     d = math.sqrt(max(0, corr_dist**2 - abs(cfg['h'] - self.marker_h)**2))
                     
+                    # 수평 각도 및 가중치 계산 (중심부 신뢰도 강화)
                     rel_x = (np.mean(c[:, 0]) - frame.shape[1]/2) / (frame.shape[1]/2)
+                    weight = max(0.1, 1.0 - abs(rel_x)) # 중심에서 멀어질수록 가중치 감소
+                    
                     m_yaw_deg = (rel_x * cfg['fov']) * self.angle_gain
                     t_rad = math.radians(cfg['map_angle'] + cfg['yaw'] + m_yaw_deg)
                     raw_pos = cfg['pos'] + np.array([d * self.map_scale * math.cos(t_rad), d * self.map_scale * math.sin(t_rad)])
                     
-                    # 각도 계산 (원본 수식 보존)
                     marker_vec = c[0] - c[3]
                     h = t_rad + math.atan2(marker_vec[1], marker_vec[0]) - (math.pi/2)
                     if ids[0][0] == 1: h += math.pi 
                     
-                    detected_data.append((raw_pos, h, d, t_rad, m_yaw_deg))
+                    detected_data.append((raw_pos, h, weight))
 
-                    # 맵 시각화 (원본 보존)
+                    # [복구] 개별 카메라별 거리 호, 연결선, 텍스트 표시
                     cp, rp = tuple(cfg['pos'].astype(int)), tuple(raw_pos.astype(int))
                     dist_px = int(d * self.map_scale)
                     cv2.ellipse(m_map, cp, (dist_px, dist_px), 0, math.degrees(t_rad)-5, math.degrees(t_rad)+5, cfg['color'], 2, cv2.LINE_AA)
                     cv2.line(m_map, cp, rp, cfg['color'], 1, cv2.LINE_AA)
                     txt_pos = ((cp[0]+rp[0])//2, (cp[1]+rp[1])//2)
-                    cv2.putText(m_map, f"{d:.0f}cm / {m_yaw_deg:+.1f}deg", (txt_pos[0]+5, txt_pos[1]-5), 0, 0.4, (180, 180, 180), 1, cv2.LINE_AA)
+                    cv2.putText(m_map, f"{d:.0f}cm / {m_yaw_deg:+.1f}deg (w:{weight:.1f})", (txt_pos[0]+5, txt_pos[1]-5), 0, 0.4, (180, 180, 180), 1, cv2.LINE_AA)
 
+            # [개선] 가중 평균을 이용한 데이터 통합
             if len(detected_data) > 0:
-                avg_pos = np.mean([p[0] for p in detected_data], axis=0)
-                avg_h = math.atan2(np.mean([math.sin(p[1]) for p in detected_data]), np.mean([math.cos(p[1]) for p in detected_data]))
+                total_w = sum(p[2] for p in detected_data)
+                avg_pos = sum(p[0] * p[2] for p in detected_data) / total_w
+                
+                # 각도 벡터 합산 (튐 방지)
+                avg_sin = sum(math.sin(p[1]) * p[2] for p in detected_data) / total_w
+                avg_cos = sum(math.cos(p[1]) * p[2] for p in detected_data) / total_w
+                avg_h = math.atan2(avg_sin, avg_cos)
                 
                 if play and self.is_initialized:
-                    # [추가된 각도 가드 로직]
-                    # 이전 각도와 너무 차이가 크면(노이즈), 반영 속도를 늦추거나 무시함
-                    diff = (avg_h - self.heading_angle + math.pi) % (2 * math.pi) - math.pi
-                    if abs(diff) > math.radians(50): # 50도 이상 갑자기 튀는 경우
-                        actual_alpha = self.alpha * 0.1 # 부드러움을 더 극대화하여 튐 억제
-                    else:
-                        actual_alpha = self.alpha
-                    
+                    # Smoothing 적용
                     self.marker_pos = self.marker_pos * (1 - self.alpha) + avg_pos * self.alpha
-                    self.heading_angle = math.atan2(math.sin(self.heading_angle)*(1-actual_alpha) + math.sin(avg_h)*actual_alpha, 
-                                                    math.cos(self.heading_angle)*(1-actual_alpha) + math.cos(avg_h)*actual_alpha)
+                    diff = (avg_h - self.heading_angle + math.pi) % (2 * math.pi) - math.pi
+                    self.heading_angle += diff * self.alpha
                 else:
-                    self.marker_pos, self.heading_angle = avg_pos, avg_h
-                    self.is_initialized = True
+                    self.marker_pos, self.heading_angle, self.is_initialized = avg_pos, avg_h, True
 
             if self.is_initialized:
-                # 휠체어 렌더링 (원본 보존)
+                # [원본] 휠체어 렌더링 로직 그대로 유지
                 offset_dist = (self.wc_l / 2) * self.map_scale
                 center_pos = self.marker_pos + np.array([offset_dist * math.cos(self.heading_angle), offset_dist * math.sin(self.heading_angle)])
                 w_px, l_px = (self.wc_w * self.map_scale) / 2, (self.wc_l * self.map_scale) / 2
@@ -177,7 +175,7 @@ class FinalOptimizedTracker:
                 cv2.arrowedLine(m_map, tuple(center_pos.astype(int)), (int(center_pos[0] + 45 * math.cos(self.heading_angle)), int(center_pos[1] + 45 * math.sin(self.heading_angle))), (255, 255, 255), 2)
 
             cv2.imshow(self.win_name, m_map)
-            # 모니터 출력 화면이 None일 경우 예외 처리
+            # [복구] 모니터 창 예외 처리 및 출력
             m0_res = cv2.resize(mon0, (640, 360)) if mon0 is not None else np.zeros((360, 640, 3), np.uint8)
             m1_res = cv2.resize(mon1, (640, 360)) if mon1 is not None else np.zeros((360, 640, 3), np.uint8)
             cv2.imshow("Monitor", np.hstack([m0_res, m1_res]))
