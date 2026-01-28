@@ -52,8 +52,8 @@ class CompactTracker:
         self.dynamic_obstacles = []  # [(x, y, radius), ...]
         
         # 영상
-        self.cap0 = cv2.VideoCapture('rear_1.mp4')
-        self.cap1 = cv2.VideoCapture('left_1.mp4')
+        self.cap0 = cv2.VideoCapture(0)
+        self.cap1 = cv2.VideoCapture(1)
         self.total_frames = int(min(self.cap0.get(cv2.CAP_PROP_FRAME_COUNT), self.cap1.get(cv2.CAP_PROP_FRAME_COUNT)))
         
         self.win_name = "Compact Tracker"
@@ -401,7 +401,7 @@ class CompactTracker:
                    0, 0.4, (255,200,100), 1)
     
     def run(self):
-        play = False
+        play = True
         while True:
             if play:
                 ret0, self.f0 = self.cap0.read()
