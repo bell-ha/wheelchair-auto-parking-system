@@ -3,660 +3,524 @@ import numpy as np
 import math
 import heapq
 
-class FinalOptimizedTracker:
+class CompactTracker:
     def __init__(self):
-        # 1. 물리 및 지도 설정 (확장된 맵)
-        self.marker_size = 25.0
-        self.marker_h = 72.0        
-        self.map_w, self.map_h = 1200, 1200  # 맵 크기 확장
-        self.grid_w, self.grid_h = 800, 900  # 그리드 범위 확장
-        self.map_scale = 0.5 
+        # 맵 설정
+        self.map_w, self.map_h = 1200, 1200
+        self.grid_w, self.grid_h = 800, 900
         self.off_x, self.off_y = 200, 150
-
-        self.wc_w, self.wc_l = 57.0, 100.0           
+        self.map_scale = 0.5
+        self.wc_w, self.wc_l = 57.0, 100.0
         
-        self.marker_pos = None     
-        self.heading_angle = 0.0   
-        self.is_initialized = False 
-
-        self.cap0 = cv2.VideoCapture('../wheelchairdetect/rear.mp4')
-        self.cap1 = cv2.VideoCapture('../wheelchairdetect/left.mp4')
-        self.total_frames = int(min(self.cap0.get(cv2.CAP_PROP_FRAME_COUNT), 
-                                    self.cap1.get(cv2.CAP_PROP_FRAME_COUNT)))
-        
-        self.curr_f0 = None
-        self.curr_f1 = None
-
-        # 차량 중심 위치 계산 (그리드 중앙)
-        car_center_x = self.off_x + self.grid_w / 2
-        car_center_y = self.off_y + self.grid_h / 2
-        
-        # 카메라 위치 (차량 중심 기준으로 재배치)
+        # 마커 및 카메라
+        self.marker_size, self.marker_h = 25.0, 72.0
+        car_cx, car_cy = self.off_x + self.grid_w/2, self.off_y + self.grid_h/2
         self.cams = {
-            'cam1': {  # Left camera
-                'pos': np.array([car_center_x - 100.0, car_center_y - 135.0]), 
-                'h': 110.0, 'focal': 841.0, 'map_angle': 157, 
-                'yaw': 1.0, 'fov': 45, 'color': (255, 120, 100), 'name': 'Left'
-            },
-            'cam0': {  # Rear camera
-                'pos': np.array([car_center_x + 1.4, car_center_y + 135.0]), 
-                'h': 105.0, 'focal': 836.0, 'map_angle': 90, 
-                'yaw': 1.0, 'fov': 45, 'color': (100, 120, 255), 'name': 'Rear'
-            }
+            'cam1': {'pos': np.array([car_cx-100, car_cy-135]), 'h': 110, 'focal': 841, 'map_angle': 157, 'yaw': 1, 'fov': 45, 'color': (255,120,100)},
+            'cam0': {'pos': np.array([car_cx+1.4, car_cy+135]), 'h': 105, 'focal': 836, 'map_angle': 90, 'yaw': 1, 'fov': 45, 'color': (100,120,255)}
         }
+        self.dist_gain, self.angle_gain, self.alpha = 1.03, 1.56, 0.75
+        self.detector = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_250), cv2.aruco.DetectorParameters())
         
-        self.dist_gain = 1.03      
-        self.angle_gain = 1.56     
-        self.alpha = 0.75          
-
-        self.detector = cv2.aruco.ArucoDetector(
-            cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_250),
-            cv2.aruco.DetectorParameters()
-        )
-
-        # 차량 및 장애물 설정 (중앙 배치)
-        self.car_dim = [200.0, 360.0]  
-        self.ramp_dim = [150.0, 200.0]  
-        self.wheelchair_size_cm = 40.0  
-        
-        # 차량 위치 (그리드 중앙)
-        self.car_x = car_center_x - self.car_dim[0] / 2
-        self.car_y = car_center_y - self.car_dim[1] /1.6
-        
-        # 다단계 목표 설정
+        # 차량
+        self.car_dim = [200, 360]
+        self.car_x, self.car_y = car_cx - self.car_dim[0]/2, car_cy - self.car_dim[1]/1.6
         car_rear_y = self.car_y + self.car_dim[1] + 150
         
-        # 주차/출차 모드 설정
-        self.parking_mode = True  # True: 주차, False: 출차
-        self.user_exit_choice = None  # 출차 시 사용자 선택 (0 또는 1)
-        
-        # 출차용 추가 목표 2개
-        exit_goal_y = self.off_y + 400  # 출차 최종 목표 Y 위치
-        self.exit_final_goals = [
-            {'pos': (car_center_x + 250, exit_goal_y), 'angle': None},  # 출차 목표 1
-            {'pos': (car_center_x - 250, exit_goal_y), 'angle': None}   # 출차 목표 2
+        # 시나리오 (간소화)
+        self.parking_mode = True
+        self.goals = [
+            [(car_cx, car_rear_y+100, -90)],  # S0: 2개 중 선택
+            [(car_cx, car_rear_y+100, -90)],   # S2: 진입
+            [(car_cx, car_rear_y-70, -90)]  # S1: 정렬
+        ]
+        self.exit_goals = [
+            [(car_cx, car_rear_y+70, -90)],  # S0: 후진
+            [(car_cx-230, self.off_y+400, None), (car_cx+230, self.off_y+400, None)],  # S2: 최종 (동적)
+            [(car_cx-230, self.off_y+400, None), (car_cx+230, self.off_y+400, None)]  # S2: 최종 (동적)
         ]
         
-        # 주차 시나리오
-        self.parking_stages = [
-            # Stage 0: 초기 접근
-            {
-                'positions': [
-                    {'pos': (car_center_x + 240, car_rear_y), 'angle': None},
-                    {'pos': (car_center_x - 240, car_rear_y), 'angle': None}
-                ],
-                'select_nearest': True,
-                'name': 'Parking: Initial Approach',
-                'use_planning': True,
-                'consider_angle': False
-            },
-            # Stage 1: 정렬
-            {
-                'positions': [
-                    {'pos': (car_center_x, car_rear_y - 70), 'angle': math.radians(-90)}
-                ],
-                'select_nearest': False,
-                'name': 'Parking: Front Alignment',
-                'use_planning': True,
-                'consider_angle': True
-            },
-            # Stage 2: 최종 진입
-            {
-                'positions': [
-                    {'pos': (car_center_x, car_rear_y + 100), 'angle': math.radians(-90)}
-                ],
-                'select_nearest': False,
-                'name': 'Parking: Final Position',
-                'use_planning': False,
-                'consider_angle': True
-            }
-        ]
-        
-        # 출차 시나리오
-        self.exit_stages = [
-            # Stage 0: 후진 출발 (주차 S2 위치에서 시작)
-            {
-                'positions': [
-                    {'pos': (car_center_x, car_rear_y + 80), 'angle': math.radians(-90)}
-                ],
-                'select_nearest': False,
-                'name': 'Exit: Reverse Start',
-                'use_planning': False,
-                'consider_angle': True
-            },
-            # Stage 1: 사용자 선택 대기 (주차 S0 위치 중 선택)
-            {
-                'positions': [
-                    {'pos': (car_center_x + 250, car_rear_y), 'angle': None},
-                    {'pos': (car_center_x - 250, car_rear_y), 'angle': None}
-                ],
-                'select_nearest': True,  # 가까운 쪽 자동 선택
-                'name': 'Exit: Position Selection',
-                'use_planning': True,
-                'consider_angle': False,
-                'wait_for_user': True  # 사용자 선택 대기
-            },
-            # Stage 2: 최종 출차 목표 (사용자가 선택한 방향)
-            {
-                'positions': [],  # 동적으로 채워짐
-                'select_nearest': False,
-                'name': 'Exit: Final Destination',
-                'use_planning': True,
-                'consider_angle': True
-            }
-        ]
-        
-        # 현재 활성 시나리오
-        self.goal_stages = self.parking_stages if self.parking_mode else self.exit_stages
-        
-        self.current_stage = 0
-        self.current_goal_idx = 0
-        self.goal_tolerance = 15.0  # 목표 도달 판정 거리
-        self.angle_tolerance = math.radians(10)  # 각도 허용 오차
-        self.initial_goal_selected = False
-        
+        self.stage, self.goal_idx = 0, 0
+        self.exit_choice = 0
+        self.goal_selected = False
         self.path = []
-        self.planning_enabled = True  
-
-        self.win_name = "Integrated Wheelchair Tracker"
-        cv2.namedWindow(self.win_name)
         
-        cv2.createTrackbar("Frame", self.win_name, 278, self.total_frames - 1, self.on_frame_change)
-        cv2.createTrackbar("Mode", self.win_name, 1, 1, self.on_mode_change)  # 1=주차, 0=출차
-        cv2.createTrackbar("ExitChoice", self.win_name, 0, 1, self.on_exit_choice)  # 출차 방향 선택
-
-        self.on_frame_change(278)
-
-    def on_frame_change(self, v):
+        # 상태
+        self.marker_pos, self.heading_angle, self.is_initialized = None, 0.0, False
+        
+        # 동적 장애물
+        self.dynamic_obstacles = []  # [(x, y, radius), ...]
+        
+        # 영상
+        self.cap0 = cv2.VideoCapture('rear_1.mp4')
+        self.cap1 = cv2.VideoCapture('left_1.mp4')
+        self.total_frames = int(min(self.cap0.get(cv2.CAP_PROP_FRAME_COUNT), self.cap1.get(cv2.CAP_PROP_FRAME_COUNT)))
+        
+        self.win_name = "Compact Tracker"
+        cv2.namedWindow(self.win_name)
+        cv2.setMouseCallback(self.win_name, self.mouse_callback)
+        cv2.createTrackbar("Frame", self.win_name, 278, self.total_frames-1, self.on_frame)
+        cv2.createTrackbar("Mode", self.win_name, 1, 1, self.on_mode)
+        cv2.createTrackbar("ExitDir", self.win_name, 0, 1, self.on_exit)
+        self.on_frame(278)
+    
+    def mouse_callback(self, event, x, y, flags, param):
+        """마우스 클릭으로 장애물 추가/제거"""
+        if event == cv2.EVENT_LBUTTONDOWN:
+            # 클릭한 위치에 장애물 추가
+            self.dynamic_obstacles.append((x, y, 30))  # 반경 30px
+            print(f"➕ 장애물 추가: ({x}, {y})")
+            # 즉시 경로 재계획 (초기화 상태 무관)
+            if self.is_initialized:
+                self.update_path()
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            # 가까운 장애물 제거
+            for i, (ox, oy, r) in enumerate(self.dynamic_obstacles):
+                if math.sqrt((ox-x)**2 + (oy-y)**2) < r:
+                    self.dynamic_obstacles.pop(i)
+                    print(f"➖ 장애물 제거: ({ox}, {oy})")
+                    if self.is_initialized:
+                        self.update_path()
+                    break
+    
+    def on_frame(self, v):
         self.cap0.set(cv2.CAP_PROP_POS_FRAMES, v)
         self.cap1.set(cv2.CAP_PROP_POS_FRAMES, v)
-        _, self.curr_f0 = self.cap0.read()
-        _, self.curr_f1 = self.cap1.read()
-
-    def on_mode_change(self, v):
-        """주차/출차 모드 전환"""
+        _, self.f0 = self.cap0.read()
+        _, self.f1 = self.cap1.read()
+    
+    def on_mode(self, v):
         self.parking_mode = (v == 1)
-        self.goal_stages = self.parking_stages if self.parking_mode else self.exit_stages
-        self.current_stage = 0
-        self.current_goal_idx = 0
-        self.initial_goal_selected = False
+        self.stage, self.goal_idx, self.goal_selected = 0, 0, False
         self.path = []
-        print(f"🔄 모드 변경: {'주차' if self.parking_mode else '출차'}")
-
-    def on_exit_choice(self, v):
-        """출차 방향 선택"""
-        self.user_exit_choice = v
-        direction = "왼쪽" if v == 0 else "오른쪽"
-        print(f"🎯 출차 방향 선택: {direction}")
-        
-        # Stage 2의 목표를 사용자 선택에 따라 즉시 변경
-        if not self.parking_mode:
-            self.exit_stages[2]['positions'] = [self.exit_final_goals[v]]
-            
-            # Stage 1에 있다면 목표 재선택
-            if self.current_stage == 1:
-                self.select_exit_waypoint()
-            
-            # 경로 재계획
-            if self.current_stage >= 1:
-                self.update_path()
-
-    def select_exit_waypoint(self):
-        """출차 모드 Stage 1: 최종 목표와 가까운 경유지 선택"""
-        if self.parking_mode or self.current_stage != 1:
-            return
-        
-        stage = self.exit_stages[1]
-        final_goal = self.exit_final_goals[self.user_exit_choice]['pos']
-        
-        # 각 경유지에서 최종 목표까지의 거리 계산
-        min_dist = float('inf')
-        nearest_idx = 0
-        
-        for i, waypoint_info in enumerate(stage['positions']):
-            waypoint = waypoint_info['pos']
-            dist = math.sqrt((final_goal[0] - waypoint[0])**2 + (final_goal[1] - waypoint[1])**2)
-            if dist < min_dist:
-                min_dist = dist
-                nearest_idx = i
-        
-        if nearest_idx != self.current_goal_idx:
-            self.current_goal_idx = nearest_idx
-            side = "우측" if nearest_idx == 0 else "좌측"
-
-    def advance_stage(self):
-        """다음 단계로 진행"""
-        stage = self.goal_stages[self.current_stage]
-        
-        if self.current_goal_idx < len(stage['positions']) - 1:
-            self.current_goal_idx += 1
-            print(f"🎯 목표 변경: Stage {self.current_stage} - Goal {self.current_goal_idx + 1}")
-        elif self.current_stage < len(self.goal_stages) - 1:
-            self.current_stage += 1
-            self.current_goal_idx = 0
-            print(f"✅ Stage {self.current_stage - 1} 완료! → {self.goal_stages[self.current_stage]['name']}")
-            
-            # 출차 모드 Stage 1 진입 시 경유지 선택
-            if not self.parking_mode and self.current_stage == 1:
-                self.select_exit_waypoint()
-        else:
-            mode_name = "주차" if self.parking_mode else "출차"
-            print(f"🎉 {mode_name} 완료!")
-            return False
-        return True
-
+    
+    def on_exit(self, v):
+        self.exit_choice = v
+        if not self.parking_mode and self.stage == 1:
+            # 출차 방향에 따라 경유지 선택
+            final = self.exit_goals[2][v][0:2]
+            dists = [math.dist(final, g[0:2]) for g in self.exit_goals[1]]
+            self.goal_idx = dists.index(min(dists))
+    
     def is_obstacle(self, px, py):
-        """장애물 체크"""
-        margin = self.wheelchair_size_cm + 10.0
+        # 휠체어의 안전 반경 (휠체어 폭의 절반 + 여유분)
+        safe_margin = (self.wc_w * self.map_scale / 2) + 30 
         
-        # 차량 충돌 체크
-        if (self.car_x - margin) <= px <= (self.car_x + self.car_dim[0] + margin) and \
-           (self.car_y - margin) <= py <= (self.car_y + self.car_dim[1] + margin):
+        # 1. 차량 장애물 (마진 포함)
+        if (self.car_x - safe_margin) <= px <= (self.car_x + self.car_dim[0] + safe_margin) and \
+           (self.car_y - safe_margin) <= py <= (self.car_y + self.car_dim[1] + safe_margin):
             return True
+            
+        # 2. 동적 장애물 (장애물 반경 + 휠체어 안전 반경)
+        for ox, oy, r in self.dynamic_obstacles:
+            dist = math.sqrt((px - ox)**2 + (py - oy)**2)
+            if dist < (r + safe_margin): # 장애물 크기에 휠체어 크기 합산
+                return True
         return False
+    def interpolate_path(self, path, interval=30.0):
+        """웨이포인트 사이의 간격이 interval보다 크면 중간 점들을 채워넣음"""
+        if len(path) < 2:
+            return path
+        
+        new_path = []
+        for i in range(len(path) - 1):
+            p1 = np.array(path[i])
+            p2 = np.array(path[i+1])
+            dist = math.dist(p1, p2)
+            
+            new_path.append(path[i])
+            
+            # 두 점 사이의 거리가 interval보다 크면 중간에 점 추가
+            if dist > interval:
+                num_points = int(dist // interval)
+                for j in range(1, num_points + 1):
+                    # 선형 보간 계산
+                    t = j / (num_points + 1)
+                    inter_pt = p1 * (1 - t) + p2 * t
+                    new_path.append(inter_pt.tolist())
+                    
+        new_path.append(path[-1])
+        return new_path
 
-    def simplify_path(self, path, epsilon=3.0):
-        if len(path) < 3: return path
-        def get_distance(p, a, b):
-            if np.array_equal(a, b): return np.linalg.norm(p - a)
+    def astar(self, start, goal):
+        sn, gn = (int(start[0]), int(start[1])), (int(goal[0]), int(goal[1]))
+        if self.is_obstacle(*sn): return [start, goal]
+
+        # [신규] 경사각 제한 설정
+        # ALLOWED_SLOPE: Y축(수직) 기준 좌우로 허용할 최대 각도 (예: 30도)
+        # 30도 이상 옆으로 누운 대각선은 페널티를 받게 됩니다.
+        ALLOWED_SLOPE = math.radians(20) 
+        SLOPE_PENALTY_WEIGHT = 200.0 
+
+        open_l = []
+        heapq.heappush(open_l, (0, sn, (0, 0)))
+        came, g_s = {}, {sn: 0}
+
+        ROTATION_PENALTY = 100.0
+
+        while open_l:
+            _, curr, prev_dir = heapq.heappop(open_l)
+            if math.dist(curr, gn) < 25:
+                res = [list(curr)]
+                while curr in came:
+                    curr = came[curr]
+                    res.append(list(curr))
+                
+                simplified = self.simplify_path(res[::-1], epsilon=20.0)
+                return self.interpolate_path(simplified, interval=30.0)
+
+            for dx, dy in [(0,12),(0,-12),(12,0),(-12,0),(9,9),(9,-9),(-9,9),(-9,-9)]:
+                nb = (curr[0] + dx, curr[1] + dy)
+                if not (0 <= nb[0] < self.map_w and 0 <= nb[1] < self.map_h) or self.is_obstacle(*nb):
+                    continue
+                
+                move_cost = math.dist(curr, nb)
+                
+                # 1. 경사각 페널티 (수직 위주 주행 유도)
+                slope_penalty = 0.0
+                if dx != 0:
+                    # atan2(abs(dx), abs(dy))는 수직선 대비 기울어진 각도를 계산합니다.
+                    current_slope = math.atan2(abs(dx), abs(dy))
+                    if current_slope > ALLOWED_SLOPE:
+                        # 허용 각도를 벗어날수록 페널티 증가
+                        slope_penalty = SLOPE_PENALTY_WEIGHT * (current_slope / (math.pi/2))
+
+
+                
+                # 3. 회전 페널티
+                rot_penalty = ROTATION_PENALTY if (prev_dir != (0, 0) and prev_dir != (dx, dy)) else 0
+                
+                # 비용 총합
+                tg = g_s[curr] + move_cost + slope_penalty + rot_penalty
+                
+                if nb not in g_s or tg < g_s[nb]:
+                    came[nb], g_s[nb] = curr, tg
+                    # Heuristic 가중치를 높여 목적지 지향성을 강화
+                    f_score = tg + math.dist(nb, gn) * 1.5
+                    heapq.heappush(open_l, (f_score, nb, (dx, dy)))
+        return [start, goal]
+    
+    def simplify_path(self, path, epsilon=5.0):
+        """Douglas-Peucker 알고리즘 기반 경로 단순화"""
+        if len(path) < 3: 
+            return path
+        
+        # 리스트를 넘파이 배열로 변환 (계산 편의성)
+        pts = np.array(path)
+        
+        def get_dist(p, a, b):
+            """점 p와 직선 ab 사이의 거리 계산"""
+            if np.array_equal(a, b): 
+                return np.linalg.norm(p - a)
             return np.abs(np.cross(b - a, a - p)) / np.linalg.norm(b - a)
-        dmax, index = 0, 0
-        for i in range(1, len(path) - 1):
-            d = get_distance(np.array(path[i]), np.array(path[0]), np.array(path[-1]))
-            if d > dmax: index, dmax = i, d
+        
+        # 가장 멀리 떨어진 점 찾기
+        dmax, idx = 0, 0
+        for i in range(1, len(pts) - 1):
+            d = get_dist(pts[i], pts[0], pts[-1])
+            if d > dmax:
+                idx, dmax = i, d
+        
+        # 거리가 기준치(epsilon)보다 크면 분할 정복
         if dmax > epsilon:
-            left = self.simplify_path(path[:index+1], epsilon)
-            right = self.simplify_path(path[index:], epsilon)
+            left = self.simplify_path(path[:idx+1], epsilon)
+            right = self.simplify_path(path[idx:], epsilon)
             return left[:-1] + right
+        
+        # 기준치보다 작으면 시작점과 끝점만 반환
         return [path[0], path[-1]]
     
-    def can_see_goal(self, start, goal):
-        """시작점에서 목표점까지 직선 상에 장애물이 있는지 체크"""
-        steps = 20  # 경로를 20개 지점으로 나누어 검사
-        for i in range(steps + 1):
-            t = i / steps
-            curr_x = start[0] * (1 - t) + goal[0] * t
-            curr_y = start[1] * (1 - t) + goal[1] * t
-            if self.is_obstacle(curr_x, curr_y):
-                return False
-        return True
+    def get_goal(self):
+        goals = self.goals if self.parking_mode else self.exit_goals
+        g = goals[self.stage][self.goal_idx]
+        return (g[0], g[1]), g[2]
     
-    def astar_plan(self, start, goal):
-        # 헬퍼 함수: 시작점과 끝점 사이에 장애물이 있는지 체크 (직선 가시성)
-        def can_see_goal(s, g):
-            steps = 20
-            for i in range(steps + 1):
-                t = i / steps
-                curr_x = s[0] * (1 - t) + g[0] * t
-                curr_y = s[1] * (1 - t) + g[1] * t
-                if self.is_obstacle(curr_x, curr_y):
-                    return False
+    def check_reached(self, pos):
+        gpos,gang = self.get_goal()
+        dist = math.dist(pos, gpos)
+        if dist < 15:
+            if gang is not None:
+                angle_diff = abs(math.atan2(math.sin(math.radians(gang)-self.heading_angle), 
+                                           math.cos(math.radians(gang)-self.heading_angle)))
+                return angle_diff < math.radians(20)
             return True
-
-        start_node = (int(start[0]), int(start[1]))
-        goal_node = (int(goal[0]), int(goal[1]))
-
-        # [수정 핵심] 직선상에 장애물이 없다면 A* 계산 없이 즉시 직선 경로 반환
-        if can_see_goal(start_node, goal_node):
-            return [list(start_node), list(goal_node)]
-
-        if self.is_obstacle(start_node[0], start_node[1]): return []
-        
-        # 장애물이 있을 때만 수행되는 기존 A* 로직
-        def heuristic(a, b):
-            return math.sqrt((a[0] - b[0])**2 + (a[1] - b[1])**2) * 1.8
-            
-        open_list = []
-        heapq.heappush(open_list, (0, start_node, (0, 0)))
-        came_from = {}
-        g_score = {start_node: 0}
-        ROTATION_PENALTY = 50.0
-
-        while open_list:
-            _, current, prev_dir = heapq.heappop(open_list)
-            # 도착 판정 거리 (조금 넉넉하게 15px)
-            if math.sqrt((current[0]-goal_node[0])**2 + (current[1]-goal_node[1])**2) < 15:
-                raw_path = []
-                temp_curr = current
-                while temp_curr in came_from:
-                    raw_path.append([temp_curr[0], temp_curr[1]])
-                    temp_curr = came_from[temp_curr]
-                raw_path.reverse()
-                return self.simplify_path(raw_path, epsilon=5.0)
-
-            for dx, dy in [(0,5),(0,-5),(5,0),(-5,0),(4,4),(4,-4),(-4,4),(-4,-4)]:
-                neighbor = (current[0] + dx, current[1] + dy)
-                if not (0 <= neighbor[0] < self.map_w and 0 <= neighbor[1] < self.map_h): continue
-                if self.is_obstacle(neighbor[0], neighbor[1]): continue
-
-                move_dist = math.sqrt(dx**2 + dy**2)
-                penalty = 0.0
-                if prev_dir != (0, 0) and prev_dir != (dx, dy):
-                    penalty = ROTATION_PENALTY
-                
-                tentative_g_score = g_score[current] + move_dist + penalty
-                if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
-                    came_from[neighbor] = current
-                    g_score[neighbor] = tentative_g_score
-                    f_score = tentative_g_score + heuristic(neighbor, goal_node)
-                    heapq.heappush(open_list, (f_score, neighbor, (dx, dy)))
-        return []
-
-    def get_current_goal(self):
-        """현재 단계의 목표 반환"""
-        stage = self.goal_stages[self.current_stage]
-        return stage['positions'][self.current_goal_idx]
-
-    def check_goal_reached(self, center_pos):
-        """목표 도달 확인"""
-        current_goal = self.get_current_goal()
-        goal_pos = current_goal['pos']
-        goal_angle = current_goal['angle']
-        
-        # 위치 도달 확인
-        dist = math.sqrt((goal_pos[0] - center_pos[0])**2 + (goal_pos[1] - center_pos[1])**2)
-        
-        if dist < self.goal_tolerance:
-            # 목표 각도가 있으면 각도도 확인
-            if goal_angle is not None:
-                angle_diff = abs(math.atan2(
-                    math.sin(goal_angle - self.heading_angle),
-                    math.cos(goal_angle - self.heading_angle)
-                ))
-                if angle_diff < self.angle_tolerance:
-                    return True
-                else:
-                    return False  # 위치는 도달했지만 각도 미달
-            else:
-                return True  # 각도 제약 없으면 위치만 확인
         return False
-
-    def advance_stage(self):
-        """다음 단계로 진행"""
-        stage = self.goal_stages[self.current_stage]
+    
+    def advance(self):
+        goals = self.goals if self.parking_mode else self.exit_goals
+        if self.goal_idx < len(goals[self.stage]) - 1:
+            self.goal_idx += 1
+        elif self.stage < len(goals) - 1:
+            self.stage += 1
+            self.goal_idx = 0
+            # 출차 시나리오 방향 결정 로직 유지
+            if not self.parking_mode and self.stage == 1:
+                final = self.exit_goals[2][self.exit_choice][0:2]
+                dists = [math.dist(final, g[0:2]) for g in self.exit_goals[1]]
+                self.goal_idx = dists.index(min(dists))
         
-        # 현재 단계 내에서 다음 목표가 있는지 확인
-        if self.current_goal_idx < len(stage['positions']) - 1:
-            self.current_goal_idx += 1
-            print(f"🎯 목표 변경: Stage {self.current_stage} - Goal {self.current_goal_idx + 1}")
-        # 다음 단계로 진행
-        elif self.current_stage < len(self.goal_stages) - 1:
-            self.current_stage += 1
-            self.current_goal_idx = 0
-            print(f"✅ Stage {self.current_stage} 완료! → {self.goal_stages[self.current_stage]['name']}")
-        else:
-            print(f"🎉 모든 단계 완료!")
-            return False
-        return True
-
-    def select_nearest_goal(self, center_pos):
-        """현재 단계에서 가장 가까운 목표 선택 (select_nearest=True인 경우만)"""
-        stage = self.goal_stages[self.current_stage]
-        
-        if not stage['select_nearest']:
+        # [핵심 수정] 스테이지가 바뀌면 기존 경로를 즉시 삭제
+        self.path = [] 
+        # goal_selected 플래그를 초기화하여 필요 시 새 위치에서 가까운 목표 재검색 허용
+        self.goal_selected = False 
+        print(f"🏁 Stage {self.stage} 전환 - 기존 경로 초기화 및 재계획 예약")
+    
+    def select_nearest(self, pos):
+        goals = self.goals if self.parking_mode else self.exit_goals
+        if self.goal_selected or self.stage != 0:
             return
-        
-        # 이미 선택했으면 다시 선택하지 않음
-        if self.initial_goal_selected:
-            return
-        
-        min_dist = float('inf')
-        nearest_idx = 0
-        for i, goal_info in enumerate(stage['positions']):
-            goal = goal_info['pos']
-            dist = math.sqrt((goal[0] - center_pos[0])**2 + (goal[1] - center_pos[1])**2)
-            if dist < min_dist: 
-                min_dist, nearest_idx = dist, i
-        
-        if nearest_idx != self.current_goal_idx:
-            self.current_goal_idx = nearest_idx
-            print(f"🎯 초기 목표 선택: G{self.current_goal_idx + 1}")
-
-        # 선택 완료 플래그 설정
-        self.initial_goal_selected = True
-
+        dists = [math.dist(pos, g[0:2]) for g in goals[0]]
+        self.goal_idx = dists.index(min(dists))
+        self.goal_selected = True
+    
     def update_path(self):
-        if self.marker_pos is None or not self.is_initialized: return
+        if not self.is_initialized: return
         
-        # 휠체어의 중심점(회전축에서 앞쪽으로 offset) 계산
-        offset_dist = (self.wc_l / 2) * self.map_scale
-        center_pos = self.marker_pos + np.array([
-            offset_dist * math.cos(self.heading_angle), 
-            offset_dist * math.sin(self.heading_angle)
-        ])
-        
-        start = (int(center_pos[0]), int(center_pos[1]))
-        current_goal = self.get_current_goal()
-        goal_pos = current_goal['pos']
+        center = self.marker_pos + np.array([(self.wc_l/2)*self.map_scale*math.cos(self.heading_angle), 
+                                             (self.wc_l/2)*self.map_scale*math.sin(self.heading_angle)])
+        gpos, _ = self.get_goal()
 
-        # Stage 2: 강제 직선 (후진/진입 구간)
-        if self.current_stage == 2:
-            self.path = [[start[0], start[1]], [int(goal_pos[0]), int(goal_pos[1])]]
-            return
+        need_replan = False
         
-        # Stage 0, 1: 가시성 기반 A* (장애물 없으면 직선, 있으면 우회)
-        new_path = self.astar_plan(start, goal_pos)
-        
-        if new_path:
-            self.path = new_path
+        if not self.path or len(self.path) < 2:
+            need_replan = True
         else:
-            # 경로를 찾지 못한 경우(장애물에 갇힘 등) 최소한 목적지 방향이라도 표시
-            self.path = [[start[0], start[1]], [int(goal_pos[0]), int(goal_pos[1])]]
+            # 1. 장애물 감지 (현재 경로상에 장애물이 들어왔는가)
+            # 웨이포인트 사이 간격이 멀어도 감지하도록 샘플링 체크
+            for i in range(len(self.path)-1):
+                p1, p2 = np.array(self.path[i]), np.array(self.path[i+1])
+                # 경로 선분 위 3지점 체크
+                for t in [0.3, 0.6, 0.9]:
+                    check_pt = p1 * (1-t) + p2 * t
+                    if self.is_obstacle(check_pt[0], check_pt[1]):
+                        need_replan = True; break
+                if need_replan: break
+            
+            # 2. 경로 이탈 판단 (임계값 70px로 상향 - 넉넉하게 허용)
+            # 현재 위치에서 전체 경로 중 가장 가까운 수선의 발 거리 계산
+            min_d = float('inf')
+            for i in range(len(self.path)-1):
+                p1, p2 = np.array(self.path[i]), np.array(self.path[i+1])
+                # 점과 선분 사이의 거리
+                line_vec = p2 - p1
+                p_vec = center - p1
+                line_len = np.sum(line_vec**2)
+                if line_len == 0: d = math.dist(center, p1)
+                else:
+                    t = max(0, min(1, np.dot(p_vec, line_vec) / line_len))
+                    projection = p1 + t * line_vec
+                    d = math.dist(center, projection)
+                min_d = min(min_d, d)
+            
+            if min_d > 70: # 70px 이상 벗어날 때만 재계획
+                need_replan = True
 
-    def draw_static_map(self, img):
-        # 배경 그리드 (전체 맵)
-        for x in range(0, self.map_w, 50): 
-            cv2.line(img, (x, 0), (x, self.map_h), (25, 25, 25), 1)
-        for y in range(0, self.map_h, 50): 
-            cv2.line(img, (0, y), (self.map_w, y), (25, 25, 25), 1)
-
-        # 그리드 영역 시각화
-        step = int(20 * self.map_scale * 2) 
-        for x in range(0, self.grid_w + 1, step):
-            c = (45, 45, 45) if x % 100 != 0 else (80, 80, 80)
-            cv2.line(img, (self.off_x + x, self.off_y), (self.off_x + x, self.off_y + self.grid_h), c, 1)
-        for y in range(0, self.grid_h + 1, step):
-            c = (45, 45, 45) if y % 100 != 0 else (80, 80, 80)
-            cv2.line(img, (self.off_x, self.off_y + y), (self.off_x + self.grid_w, self.off_y + y), c, 1)
+        if need_replan:
+            new_path = self.astar(center, gpos)
+            # 깜빡임 방지: 새로 짠 경로와 현재 경로가 너무 비슷하면 교체 안 함
+            self.path = new_path
+            print("🔄 경로 재계획 실행")
+        else:
+            # 3. 웨이포인트 통과 판단 (진행 방향 내적 활용)
+            # 휠체어가 현재 첫 번째 웨이포인트(path[0])를 '지나쳤는지' 확인
+            if len(self.path) > 1:
+                p1 = np.array(self.path[0])
+                p2 = np.array(self.path[1])
+                
+                v_path = p2 - p1 # 현재 가야 할 경로 벡터
+                v_wc = center - p1 # 휠체어 위치 벡터
+                
+                # 내적을 이용해 p1을 지나쳐 p2 방향으로 진행 중인지 확인
+                dist_to_p1 = math.dist(center, p1)
+                dot_product = np.dot(v_path, v_wc)
+                
+                # p1에 아주 가깝거나(25px), 이미 p1을 지나 p2 쪽으로 가고 있다면 p1 제거
+                if dist_to_p1 < 25 or dot_product > 0:
+                    if len(self.path) > 2: # 최소 목적지는 남겨둠
+                        self.path.pop(0)
+    
+    def draw_map(self, img):
+        # 그리드
+        for i in range(0, self.map_w, 50):
+            cv2.line(img, (i,0), (i,self.map_h), (25,25,25), 1)
+        for i in range(0, self.map_h, 50):
+            cv2.line(img, (0,i), (self.map_w,i), (25,25,25), 1)
         
-        # 차량 (중앙 배치)
-        cv2.rectangle(img, 
-                    (int(self.car_x), int(self.car_y)), 
-                    (int(self.car_x + self.car_dim[0]), int(self.car_y + self.car_dim[1])), 
-                    (35, 35, 45), -1)
-
-        # 경사로 (차량 후방에 연결)
-        ramp_x = self.car_x + (self.car_dim[0] - self.ramp_dim[0]) / 2  # 중앙 정렬
-        ramp_y = self.car_y + self.car_dim[1]  # 차량 뒤에서 시작
-        cv2.rectangle(img,
-                    (int(ramp_x), int(ramp_y)),
-                    (int(ramp_x + self.ramp_dim[0]), int(ramp_y + self.ramp_dim[1])),
-                    (50, 50, 70), -1)  # 경사로는 약간 다른 색상
-
-        # 경사로 테두리 (선택사항)
-        cv2.rectangle(img,
-                    (int(ramp_x), int(ramp_y)),
-                    (int(ramp_x + self.ramp_dim[0]), int(ramp_y + self.ramp_dim[1])),
-                    (100, 100, 120), 2)
-
-        cv2.rectangle(img, (self.off_x, self.off_y), (self.off_x+self.grid_w, self.off_y+self.grid_h), (180, 180, 180), 2)
-                
-        # 카메라
-        for side in self.cams:
-            cfg = self.cams[side]
-            cp = tuple(cfg['pos'].astype(int))
-            cv2.circle(img, cp, 7, cfg['color'], -1)
-            cv2.putText(img, cfg['name'], (cp[0]-25, cp[1]+25), 0, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
+        # 차량
+        cv2.rectangle(img, (int(self.car_x), int(self.car_y)), 
+                     (int(self.car_x+self.car_dim[0]), int(self.car_y+self.car_dim[1])), (35,35,45), -1)
         
-        # 모든 단계의 목표 표시
-        for stage_idx, stage in enumerate(self.goal_stages):
-            for goal_idx, goal_info in enumerate(stage['positions']):
-                goal = goal_info['pos']
-                gp = (int(goal[0]), int(goal[1]))
-                
-                # 현재 목표 강조
-                is_current = (stage_idx == self.current_stage and goal_idx == self.current_goal_idx)
-                color = (0, 255, 0) if is_current else (100, 100, 100)
-                thickness = -1 if is_current else 2
-                
-                cv2.circle(img, gp, 10, color, thickness)
-                cv2.circle(img, gp, 12, (255, 255, 255), 2)
-                
-                # 라벨
-                label = f"S{stage_idx}G{goal_idx+1}"
-                cv2.putText(img, label, (gp[0]-15, gp[1]-20), 0, 0.4, color, 1, cv2.LINE_AA)
-                
-                # 목표 각도 표시
-                if goal_info['angle'] is not None:
-                    angle = goal_info['angle']
-                    arrow_len = 25
-                    ax = int(gp[0] + arrow_len * math.cos(angle))
-                    ay = int(gp[1] + arrow_len * math.sin(angle))
-                    cv2.arrowedLine(img, gp, (ax, ay), (150, 150, 255), 2, tipLength=0.4)
-
-        # 출차 모드일 때 최종 목표 후보들도 표시
+        # 동적 장애물
+        for ox, oy, r in self.dynamic_obstacles:
+            cv2.circle(img, (ox, oy), r, (0, 0, 150), -1)
+            cv2.circle(img, (ox, oy), r, (0, 0, 255), 2)
+        
+        # 목표
+        goals = self.goals if self.parking_mode else self.exit_goals
+        for si, stage_goals in enumerate(goals):
+            for gi, g in enumerate(stage_goals):
+                gp = (int(g[0]), int(g[1]))
+                is_curr = (si == self.stage and gi == self.goal_idx)
+                col = (0,255,0) if is_curr else (100,100,100)
+                cv2.circle(img, gp, 10, col, -1 if is_curr else 2)
+                cv2.putText(img, f"S{si}", (gp[0]-8, gp[1]-15), 0, 0.4, col, 1)
+                if g[2] is not None:
+                    ax = int(gp[0] + 25*math.cos(math.radians(g[2])))
+                    ay = int(gp[1] + 25*math.sin(math.radians(g[2])))
+                    cv2.arrowedLine(img, gp, (ax,ay), (150,150,255), 2, tipLength=0.4)
+        
+        # 출차 최종 목표
         if not self.parking_mode:
-            for i, goal_info in enumerate(self.exit_final_goals):
-                goal = goal_info['pos']
-                gp = (int(goal[0]), int(goal[1]))
-                
-                # 선택된 목표 강조
-                is_selected = (self.user_exit_choice == i)
-                color = (255, 100, 0) if is_selected else (80, 80, 80)
-                
-                cv2.circle(img, gp, 8, color, -1 if is_selected else 2)
-                cv2.putText(img, f"Exit{i+1}", (gp[0]-20, gp[1]-15), 0, 0.4, color, 1, cv2.LINE_AA)
-                
-                if goal_info['angle'] is not None:
-                    angle = goal_info['angle']
-                    arrow_len = 20
-                    ax = int(gp[0] + arrow_len * math.cos(angle))
-                    ay = int(gp[1] + arrow_len * math.sin(angle))
-                    cv2.arrowedLine(img, gp, (ax, ay), color, 2, tipLength=0.4)
-
+            for i, g in enumerate(self.exit_goals[2]):
+                gp = (int(g[0]), int(g[1]))
+                col = (255,100,0) if i == self.exit_choice else (80,80,80)
+                cv2.circle(img, gp, 8, col, -1 if i == self.exit_choice else 2)
+    
     def draw_path(self, img):
-        if len(self.path) < 2: return
-        for i in range(len(self.path) - 1):
-            cv2.line(img, tuple(self.path[i]), tuple(self.path[i+1]), (0, 255, 255), 2, cv2.LINE_AA)
-        for i, point in enumerate(self.path):
-            c = (255, 0, 255) if i == 0 else (0, 255, 0) if i == len(self.path)-1 else (0, 255, 255)
-            cv2.circle(img, tuple(point), 3 if 0<i<len(self.path)-1 else 5, c, -1)
-
-    def draw_path_following_info(self, img, center_pos):
-        if not self.path or not self.is_initialized: return
-        target = self.path[0]
-        dx, dy = target[0] - center_pos[0], target[1] - center_pos[1]
+        if len(self.path) < 2:
+            return
+        cv2.polylines(img, [np.array(self.path, np.int32)], False, (0,255,255), 2)
+        
+        # 각도 정보
+        pivot = self.marker_pos
+        target = self.path[-1]
+        dx, dy = target[0]-pivot[0], target[1]-pivot[1]
         target_yaw = math.atan2(dy, dx)
-        yaw_error = math.atan2(math.sin(target_yaw - self.heading_angle), math.cos(target_yaw - self.heading_angle))
-        yaw_err_deg = math.degrees(yaw_error)
+        yaw_err = math.degrees(math.atan2(math.sin(target_yaw-self.heading_angle), 
+                                         math.cos(target_yaw-self.heading_angle)))
         
-        # 호(Arc)
-        radius = 45
-        start_angle = -math.degrees(self.heading_angle)
-        end_angle = -math.degrees(target_yaw)
-        arc_color = (0, 200, 255) if yaw_error > 0 else (255, 150, 0)
-        cv2.ellipse(img, (int(center_pos[0]), int(center_pos[1])), (radius, radius), 0, start_angle, end_angle, arc_color, 2, cv2.LINE_AA)
+        # 호
+        cv2.ellipse(img, (int(pivot[0]), int(pivot[1])), (45,45), 0, 
+                   -math.degrees(self.heading_angle), -math.degrees(target_yaw), 
+                   (0,200,255) if yaw_err>0 else (255,150,0), 2)
         
-        # UI
-        wx, wy = int(center_pos[0]), int(center_pos[1])
-        txt = f"Rotate: {yaw_err_deg:+.1f}deg"
-        t_size = cv2.getTextSize(txt, 0, 0.5, 1)[0]
-        cv2.rectangle(img, (wx + 30, wy - 95), (wx + 35 + t_size[0], wy - 45), (0, 0, 0), -1)
-        cv2.putText(img, txt, (wx + 32, wy - 78), 0, 0.5, arc_color, 1, cv2.LINE_AA)
-        cv2.putText(img, "CCW" if yaw_error > 0 else "CW", (wx + 32, wy - 68), 0, 0.4, (200, 200, 200), 1, cv2.LINE_AA)
-        cv2.putText(img, f"Dist: {math.sqrt(dx**2+dy**2):.1f}px", (wx + 32, wy - 88), 0, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
-        
-        # Stage 정보
-        stage_name = self.goal_stages[self.current_stage]['name']
-        cv2.putText(img, f"Stage {self.current_stage}: {stage_name}", (wx + 32, wy - 52), 0, 0.4, (255, 200, 100), 1, cv2.LINE_AA)
-
+        # 텍스트
+        cv2.putText(img, f"Rot: {yaw_err:+.1f}deg", (int(pivot[0])+50, int(pivot[1])-70), 
+                   0, 0.5, (0,255,255), 1)
+        cv2.putText(img, f"Stage: {self.stage}", (int(pivot[0])+50, int(pivot[1])-55), 
+                   0, 0.4, (255,200,100), 1)
+    
     def run(self):
         play = False
         while True:
             if play:
-                ret0, self.curr_f0 = self.cap0.read()
-                ret1, self.curr_f1 = self.cap1.read()
-                if not ret0 or not ret1: self.on_frame_change(0); continue
+                ret0, self.f0 = self.cap0.read()
+                ret1, self.f1 = self.cap1.read()
+                if not ret0 or not ret1:
+                    self.on_frame(0)
+                    continue
                 cv2.setTrackbarPos("Frame", self.win_name, int(self.cap0.get(cv2.CAP_PROP_POS_FRAMES)))
-
-            m_map = np.ones((self.map_h, self.map_w, 3), dtype=np.uint8) * 15
-            self.draw_static_map(m_map)
             
-            mon0 = self.curr_f0.copy() if self.curr_f0 is not None else np.zeros((360,640,3), np.uint8)
-            mon1 = self.curr_f1.copy() if self.curr_f1 is not None else np.zeros((360,640,3), np.uint8)
+            img = np.ones((self.map_h, self.map_w, 3), dtype=np.uint8) * 15
+            self.draw_map(img)
+            
+            mon0 = self.f0.copy() if self.f0 is not None else np.zeros((360,640,3), np.uint8)
+            mon1 = self.f1.copy() if self.f1 is not None else np.zeros((360,640,3), np.uint8)
+            
+            detected_data = [] # (pos, h, weight) 형태로 확장 저장
+            mon0 = self.f0.copy() if self.f0 is not None else np.zeros((360,640,3), np.uint8)
+            mon1 = self.f1.copy() if self.f1 is not None else np.zeros((360,640,3), np.uint8)
 
-            detected_data = []
-            for frame, mon_frame, side in [(self.curr_f0, mon0, 'cam0'), (self.curr_f1, mon1, 'cam1')]:
+            for frame, mon, side in [(self.f0, mon0, 'cam0'), (self.f1, mon1, 'cam1')]:
                 if frame is None: continue
                 corners, ids, _ = self.detector.detectMarkers(frame)
+                
                 if ids is not None:
-                    cv2.aruco.drawDetectedMarkers(mon_frame, corners, ids)
                     cfg = self.cams[side]
-                    c = corners[0].reshape(4, 2)
+                    c = corners[0].reshape(4,2)
+                    
+                    # 1. 거리 계산
                     px_h = (np.linalg.norm(c[0]-c[3]) + np.linalg.norm(c[1]-c[2])) / 2.0
                     raw_dist = (self.marker_size * cfg['focal']) / px_h
                     corr_dist = raw_dist * (1 + (self.dist_gain - 1) * (raw_dist / 500)) 
                     d = math.sqrt(max(0, corr_dist**2 - abs(cfg['h'] - self.marker_h)**2))
+                    
+                    # 2. [추가] 가중치 계산: 중심부 신뢰도 강화 (중앙=1.0, 가장자리=0.1)
                     rel_x = (np.mean(c[:, 0]) - frame.shape[1]/2) / (frame.shape[1]/2)
+                    weight = max(0.1, 1.0 - abs(rel_x)) 
+                    
+                    # 3. 지도상 위치 및 헤딩 계산
                     m_yaw_deg = (rel_x * cfg['fov']) * self.angle_gain
                     t_rad = math.radians(cfg['map_angle'] + cfg['yaw'] + m_yaw_deg)
-                    raw_pos = cfg['pos'] + np.array([d * self.map_scale * math.cos(t_rad), d * self.map_scale * math.sin(t_rad)])
+                    pos = cfg['pos'] + np.array([d * self.map_scale * math.cos(t_rad), d * self.map_scale * math.sin(t_rad)])
+                    
                     marker_vec = c[0] - c[3]
                     h = t_rad + math.atan2(marker_vec[1], marker_vec[0]) - (math.pi/2)
                     if ids[0][0] == 1: h += math.pi 
-                    detected_data.append((raw_pos, h, d, t_rad))
+                    
+                    detected_data.append((pos, h, weight))
 
-                    cp, rp = tuple(cfg['pos'].astype(int)), tuple(raw_pos.astype(int))
-                    cv2.ellipse(m_map, cp, (int(d*self.map_scale), int(d*self.map_scale)), 0, math.degrees(t_rad)-5, math.degrees(t_rad)+5, cfg['color'], 2, cv2.LINE_AA)
-                    cv2.line(m_map, cp, rp, cfg['color'], 1, cv2.LINE_AA)
-
+            # 4. [개선] 가중 평균을 이용한 데이터 통합
             if len(detected_data) > 0:
-                avg_pos = np.mean([p[0] for p in detected_data], axis=0)
-                avg_h = math.atan2(np.mean([math.sin(p[1]) for p in detected_data]), np.mean([math.cos(p[1]) for p in detected_data]))
-                if play and self.is_initialized:
-                    self.marker_pos = self.marker_pos * (1 - self.alpha) + avg_pos * self.alpha
-                    self.heading_angle = math.atan2(math.sin(self.heading_angle)*(1-self.alpha) + math.sin(avg_h)*self.alpha, 
-                                                    math.cos(self.heading_angle)*(1-self.alpha) + math.cos(avg_h)*self.alpha)
-                else: 
+                total_w = sum(p[2] for p in detected_data)
+                
+                # 가중치를 적용한 위치 평균
+                avg_pos = sum(p[0] * p[2] for p in detected_data) / total_w
+                
+                # [중요] 각도 벡터 합산 (atan2를 이용해 0-360도 경계선 문제 해결)
+                avg_sin = sum(math.sin(p[1]) * p[2] for p in detected_data) / total_w
+                avg_cos = sum(math.cos(p[1]) * p[2] for p in detected_data) / total_w
+                avg_h = math.atan2(avg_sin, avg_cos)
+                
+                if not self.is_initialized:
                     self.marker_pos, self.heading_angle, self.is_initialized = avg_pos, avg_h, True
+                else:
+                    # Smoothing (Exponential Moving Average)
+                    self.marker_pos = self.marker_pos * (1 - self.alpha) + avg_pos * self.alpha
+                    
+                    # 각도 차이 보정 (Shortest path interpolation)
+                    diff = (avg_h - self.heading_angle + math.pi) % (2 * math.pi) - math.pi
+                    self.heading_angle += diff * self.alpha
                 
-                if self.planning_enabled:
-                    center_pos = self.marker_pos + np.array([(self.wc_l/2)*self.map_scale*math.cos(self.heading_angle), (self.wc_l/2)*self.map_scale*math.sin(self.heading_angle)])
-                    
-                    # 주차 모드 Stage 0에서만 현재 위치 기준 선택
-                    if self.parking_mode and self.current_stage == 0:
-                        self.select_nearest_goal(center_pos)
-                    
-                    # 목표 도달 확인
-                    if self.check_goal_reached(center_pos):
-                        self.advance_stage()
-                    
-                    self.update_path()
-
+                # 휠체어 중심점 계산
+                center = self.marker_pos + np.array([(self.wc_l/2)*self.map_scale*math.cos(self.heading_angle), 
+                                                     (self.wc_l/2)*self.map_scale*math.sin(self.heading_angle)])
+                
+                # 시나리오 로직 실행
+                if self.parking_mode and self.stage == 0:
+                    self.select_nearest(center)
+                
+                if self.check_reached(center):
+                    self.advance()
+                
+                self.update_path()
+            
             if self.is_initialized:
-                center_pos = self.marker_pos + np.array([(self.wc_l/2)*self.map_scale*math.cos(self.heading_angle), (self.wc_l/2)*self.map_scale*math.sin(self.heading_angle)])
-                if self.planning_enabled:
-                    self.draw_path(m_map)
-                    self.draw_path_following_info(m_map, center_pos)
+                self.draw_path(img)
                 
-                w_px, l_px = (self.wc_w * self.map_scale) / 2, (self.wc_l * self.map_scale) / 2
-                base = np.array([[-l_px, -w_px], [l_px, -w_px], [l_px, w_px], [-l_px, w_px]])
-                rot_m = np.array([[math.cos(self.heading_angle), -math.sin(self.heading_angle)], [math.sin(self.heading_angle), math.cos(self.heading_angle)]])
-                rotated = np.dot(base, rot_m.T) + center_pos
-                cv2.polylines(m_map, [rotated.astype(np.int32)], True, (0, 255, 0), 2, cv2.LINE_AA)
-                cv2.line(m_map, tuple(rotated[0].astype(int)), tuple(rotated[3].astype(int)), (0, 0, 255), 3)
-                cv2.arrowedLine(m_map, tuple(center_pos.astype(int)), (int(center_pos[0]+45*math.cos(self.heading_angle)), int(center_pos[1]+45*math.sin(self.heading_angle))), (255, 255, 255), 2)
-
-            cv2.imshow(self.win_name, m_map)
-            cv2.imshow("Monitor", np.hstack([cv2.resize(mon0, (640, 360)), cv2.resize(mon1, (640, 360))]))
+                # 휠체어
+                center = self.marker_pos + np.array([(self.wc_l/2)*self.map_scale*math.cos(self.heading_angle), 
+                                                     (self.wc_l/2)*self.map_scale*math.sin(self.heading_angle)])
+                w, l = (self.wc_w*self.map_scale)/2, (self.wc_l*self.map_scale)/2
+                rot = np.array([[math.cos(self.heading_angle), -math.sin(self.heading_angle)],
+                               [math.sin(self.heading_angle), math.cos(self.heading_angle)]])
+                pts = np.dot([[-l,-w],[l,-w],[l,w],[-l,w]], rot.T) + center
+                cv2.polylines(img, [pts.astype(np.int32)], True, (0,255,0), 2)
+                cv2.line(img, tuple(pts[0].astype(int)), tuple(pts[3].astype(int)), (0,0,255), 3)
+                cv2.arrowedLine(img, tuple(self.marker_pos.astype(int)), 
+                              (int(self.marker_pos[0]+45*math.cos(self.heading_angle)), 
+                               int(self.marker_pos[1]+45*math.sin(self.heading_angle))), 
+                              (255,255,255), 2)
+            
+            # 도움말 표시
+            cv2.putText(img, "L-Click: Add Obstacle | R-Click: Remove", (10, 30), 0, 0.5, (200,200,200), 1)
+            
+            cv2.imshow(self.win_name, img)
+            cv2.imshow("Monitor", np.hstack([cv2.resize(mon1,(640,360)), cv2.resize(mon0,(640,360))]))
+            
             key = cv2.waitKey(30) & 0xFF
-            if key == ord(' '): play = not play
-            elif key == ord('q'): break
-            elif key == ord('p'):
-                self.planning_enabled = not self.planning_enabled
-                cv2.setTrackbarPos("Plan", self.win_name, 1 if self.planning_enabled else 0)
-
-        self.cap0.release(); self.cap1.release(); cv2.destroyAllWindows()
+            if key == ord(' '):
+                play = not play
+            elif key == ord('q'):
+                break
+            elif key == ord('c'):
+                self.dynamic_obstacles.clear()
+                print("🗑️ 모든 장애물 제거")
+                self.update_path()
+        
+        self.cap0.release()
+        self.cap1.release()
+        cv2.destroyAllWindows()
 
 if __name__ == '__main__':
-    FinalOptimizedTracker().run()
+    CompactTracker().run()
