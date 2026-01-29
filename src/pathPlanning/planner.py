@@ -16,8 +16,8 @@ class CompactTracker:
         self.marker_size, self.marker_h = 25.0, 72.0
         car_cx, car_cy = self.off_x + self.grid_w/2, self.off_y + self.grid_h/2
         self.cams = {
-            'cam1': {'pos': np.array([car_cx-100, car_cy-135]), 'h': 110, 'focal': 841, 'map_angle': 157, 'yaw': 1, 'fov': 45, 'color': (255,120,100)},
-            'cam0': {'pos': np.array([car_cx+1.4, car_cy+135]), 'h': 105, 'focal': 836, 'map_angle': 90, 'yaw': 1, 'fov': 45, 'color': (100,120,255)}
+            'cam1': {'pos': np.array([car_cx-100, car_cy-135]), 'h': 110, 'focal': 950, 'map_angle': 157, 'yaw': 1, 'fov': 45, 'color': (255,120,100)},
+            'cam0': {'pos': np.array([car_cx+1.4, car_cy+135]), 'h': 105, 'focal': 950, 'map_angle': 90, 'yaw': 1, 'fov': 45, 'color': (100,120,255)}
         }
         self.dist_gain, self.angle_gain, self.alpha = 1.03, 1.56, 0.75
         self.detector = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_250), cv2.aruco.DetectorParameters())
@@ -32,7 +32,7 @@ class CompactTracker:
         self.goals = [
             [(car_cx, car_rear_y+100, -90)],  # S0: 2개 중 선택
             [(car_cx, car_rear_y+100, -90)],   # S2: 진입
-            [(car_cx, car_rear_y-70, -90)]  # S1: 정렬
+            [(car_cx, car_rear_y-30, -90)]  # S1: 정렬
         ]
         self.exit_goals = [
             [(car_cx, car_rear_y+70, -90)],  # S0: 후진
@@ -52,8 +52,8 @@ class CompactTracker:
         self.dynamic_obstacles = []  # [(x, y, radius), ...]
         
         # 영상
-        self.cap0 = cv2.VideoCapture(0)
-        self.cap1 = cv2.VideoCapture(1)
+        self.cap0 = cv2.VideoCapture('rear_1.mp4')
+        self.cap1 = cv2.VideoCapture('left_1.mp4')
         self.total_frames = int(min(self.cap0.get(cv2.CAP_PROP_FRAME_COUNT), self.cap1.get(cv2.CAP_PROP_FRAME_COUNT)))
         
         self.win_name = "Compact Tracker"
@@ -401,7 +401,7 @@ class CompactTracker:
                    0, 0.4, (255,200,100), 1)
     
     def run(self):
-        play = True
+        play = False
         while True:
             if play:
                 ret0, self.f0 = self.cap0.read()
@@ -414,10 +414,7 @@ class CompactTracker:
             img = np.ones((self.map_h, self.map_w, 3), dtype=np.uint8) * 15
             self.draw_map(img)
             
-            mon0 = self.f0.copy() if self.f0 is not None else np.zeros((360,640,3), np.uint8)
-            mon1 = self.f1.copy() if self.f1 is not None else np.zeros((360,640,3), np.uint8)
-            
-            detected_data = [] # (pos, h, weight) 형태로 확장 저장
+            detected_data = [] 
             mon0 = self.f0.copy() if self.f0 is not None else np.zeros((360,640,3), np.uint8)
             mon1 = self.f1.copy() if self.f1 is not None else np.zeros((360,640,3), np.uint8)
 
@@ -427,37 +424,71 @@ class CompactTracker:
                 
                 if ids is not None:
                     cfg = self.cams[side]
-                    c = corners[0].reshape(4,2)
                     
-                    # 1. 거리 계산
-                    px_h = (np.linalg.norm(c[0]-c[3]) + np.linalg.norm(c[1]-c[2])) / 2.0
-                    raw_dist = (self.marker_size * cfg['focal']) / px_h
-                    corr_dist = raw_dist * (1 + (self.dist_gain - 1) * (raw_dist / 500)) 
-                    d = math.sqrt(max(0, corr_dist**2 - abs(cfg['h'] - self.marker_h)**2))
+                    # 1. 가상 카메라 매트릭스
+                    h_img, w_img = frame.shape[:2]
+                    focal_len = cfg.get('focal', w_img)
+                    cam_matrix = np.array([
+                        [focal_len, 0, w_img / 2.0],
+                        [0, focal_len, h_img / 2.0],
+                        [0, 0, 1]
+                    ], dtype=np.float32)
+                    dist_coeffs = np.zeros((4,1))
                     
-                    # 2. [추가] 가중치 계산: 중심부 신뢰도 강화 (중앙=1.0, 가장자리=0.1)
-                    rel_x = (np.mean(c[:, 0]) - frame.shape[1]/2) / (frame.shape[1]/2)
-                    weight = max(0.1, 1.0 - abs(rel_x)) 
+                    # 2. 3D 마커 객체 좌표
+                    ms = self.marker_size
+                    obj_points = np.array([
+                        [-ms/2, ms/2, 0],
+                        [ms/2, ms/2, 0],
+                        [ms/2, -ms/2, 0],
+                        [-ms/2, -ms/2, 0]
+                    ], dtype=np.float32)
                     
-                    # 3. 지도상 위치 및 헤딩 계산
-                    m_yaw_deg = (rel_x * cfg['fov']) * self.angle_gain
-                    t_rad = math.radians(cfg['map_angle'] + cfg['yaw'] + m_yaw_deg)
-                    pos = cfg['pos'] + np.array([d * self.map_scale * math.cos(t_rad), d * self.map_scale * math.sin(t_rad)])
+                    # 3. SolvePnP (IPPE_SQUARE)
+                    ret, rvec, tvec = cv2.solvePnP(
+                        obj_points, corners[0], cam_matrix, dist_coeffs, 
+                        flags=cv2.SOLVEPNP_IPPE_SQUARE
+                    )
                     
-                    marker_vec = c[0] - c[3]
-                    h = t_rad + math.atan2(marker_vec[1], marker_vec[0]) - (math.pi/2)
-                    if ids[0][0] == 1: h += math.pi 
-                    
-                    detected_data.append((pos, h, weight))
+                    if ret:
+                        z_dist = tvec[2][0]
+                        x_offset = tvec[0][0]
+                        d = z_dist * (1 + (self.dist_gain - 1) * (z_dist / 500))
+                        
+                        ray_angle = math.atan2(x_offset, z_dist)
+                        cam_global_angle = math.radians(cfg['map_angle'] + cfg['yaw'])
+                        t_rad = cam_global_angle + ray_angle
+                        
+                        pos = cfg['pos'] + np.array([
+                            d * self.map_scale * math.cos(t_rad), 
+                            d * self.map_scale * math.sin(t_rad)
+                        ])
+                        
+                        # 5. 헤딩(Yaw) 계산
+                        R, _ = cv2.Rodrigues(rvec)
+                        
+                        sy = math.sqrt(R[0, 0] * R[0, 0] + R[1, 0] * R[1, 0])
+                        if sy < 1e-6:
+                            local_yaw = math.atan2(-R[1, 2], R[1, 1])
+                        else:
+                            local_yaw = math.atan2(R[1, 0], R[0, 0])
+                        
+                        # [핵심 수정] 180도(math.pi)를 더해서 방향 반전 해결
+                        # 기존: h = cam_global_angle + local_yaw
+                        h = cam_global_angle + local_yaw + math.pi
+                        
+                        # 후방 마커 ID 체크 (기존 로직 유지)
+                        if ids[0][0] == 1: h += math.pi 
+                        
+                        rel_x = (np.mean(corners[0][:, 0, 0]) - w_img/2) / (w_img/2)
+                        weight = max(0.1, 1.0 - abs(rel_x))
+                        
+                        detected_data.append((pos, h, weight))
 
-            # 4. [개선] 가중 평균을 이용한 데이터 통합
+            # 4. 데이터 통합 (나머지 코드 동일)
             if len(detected_data) > 0:
                 total_w = sum(p[2] for p in detected_data)
-                
-                # 가중치를 적용한 위치 평균
                 avg_pos = sum(p[0] * p[2] for p in detected_data) / total_w
-                
-                # [중요] 각도 벡터 합산 (atan2를 이용해 0-360도 경계선 문제 해결)
                 avg_sin = sum(math.sin(p[1]) * p[2] for p in detected_data) / total_w
                 avg_cos = sum(math.cos(p[1]) * p[2] for p in detected_data) / total_w
                 avg_h = math.atan2(avg_sin, avg_cos)
@@ -465,30 +496,22 @@ class CompactTracker:
                 if not self.is_initialized:
                     self.marker_pos, self.heading_angle, self.is_initialized = avg_pos, avg_h, True
                 else:
-                    # Smoothing (Exponential Moving Average)
                     self.marker_pos = self.marker_pos * (1 - self.alpha) + avg_pos * self.alpha
-                    
-                    # 각도 차이 보정 (Shortest path interpolation)
                     diff = (avg_h - self.heading_angle + math.pi) % (2 * math.pi) - math.pi
                     self.heading_angle += diff * self.alpha
                 
-                # 휠체어 중심점 계산
                 center = self.marker_pos + np.array([(self.wc_l/2)*self.map_scale*math.cos(self.heading_angle), 
                                                      (self.wc_l/2)*self.map_scale*math.sin(self.heading_angle)])
                 
-                # 시나리오 로직 실행
                 if self.parking_mode and self.stage == 0:
                     self.select_nearest(center)
-                
                 if self.check_reached(center):
                     self.advance()
-                
                 self.update_path()
             
             if self.is_initialized:
                 self.draw_path(img)
-                
-                # 휠체어
+                # 휠체어 그리기
                 center = self.marker_pos + np.array([(self.wc_l/2)*self.map_scale*math.cos(self.heading_angle), 
                                                      (self.wc_l/2)*self.map_scale*math.sin(self.heading_angle)])
                 w, l = (self.wc_w*self.map_scale)/2, (self.wc_l*self.map_scale)/2
@@ -502,20 +525,16 @@ class CompactTracker:
                                int(self.marker_pos[1]+45*math.sin(self.heading_angle))), 
                               (255,255,255), 2)
             
-            # 도움말 표시
+            # 도움말
             cv2.putText(img, "L-Click: Add Obstacle | R-Click: Remove", (10, 30), 0, 0.5, (200,200,200), 1)
-            
             cv2.imshow(self.win_name, img)
             cv2.imshow("Monitor", np.hstack([cv2.resize(mon1,(640,360)), cv2.resize(mon0,(640,360))]))
             
             key = cv2.waitKey(30) & 0xFF
-            if key == ord(' '):
-                play = not play
-            elif key == ord('q'):
-                break
+            if key == ord(' '): play = not play
+            elif key == ord('q'): break
             elif key == ord('c'):
                 self.dynamic_obstacles.clear()
-                print("🗑️ 모든 장애물 제거")
                 self.update_path()
         
         self.cap0.release()
