@@ -1,3 +1,5 @@
+## 여기의 캘리브레이션은 aroundview전용
+
 ### Data폴더: 캘리브레이션 한 npz파일 or 중간중간 캡쳐한 데이터
 
 ### aroundview_left,rear.py
