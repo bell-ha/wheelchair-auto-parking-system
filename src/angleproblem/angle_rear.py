@@ -22,7 +22,7 @@ cv2.createTrackbar('Sensitivity(x10)', 'Tuning Mode', 16, 30, nothing) # 1.6 의
 cv2.createTrackbar('Offset', 'Tuning Mode', 10, 20, nothing)          # 10 = 0도 의미 (0~20)
 cv2.createTrackbar('Pause', 'Tuning Mode', 0, 1, nothing)             # 1이면 정지
 
-video_path = "90_r.mp4"
+video_path = "45_r.mp4"
 cap = cv2.VideoCapture(video_path)
 total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 cv2.createTrackbar('Frame', 'Tuning Mode', 0, total_frames - 1, nothing)

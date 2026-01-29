@@ -11,15 +11,27 @@ class CompactTracker:
         self.off_x, self.off_y = 200, 150
         self.map_scale = 0.5
         self.wc_w, self.wc_l = 57.0, 100.0
-        
+        car_cx, car_cy = self.off_x + self.grid_w/2, self.off_y + self.grid_h/2
+
         # 마커 및 카메라
         self.marker_size, self.marker_h = 25.0, 72.0
         car_cx, car_cy = self.off_x + self.grid_w/2, self.off_y + self.grid_h/2
         self.cams = {
-            'cam1': {'pos': np.array([car_cx-100, car_cy-135]), 'h': 110, 'focal': 950, 'map_angle': 157, 'yaw': 1, 'fov': 45, 'color': (255,120,100)},
-            'cam0': {'pos': np.array([car_cx+1.4, car_cy+135]), 'h': 105, 'focal': 950, 'map_angle': 90, 'yaw': 1, 'fov': 45, 'color': (100,120,255)}
+            'cam1': {
+                'pos': np.array([car_cx-250, car_cy-350]), # 왼쪽 상단 구석 위치
+                'h': 110, 'focal': 950, 
+                'map_angle': 45,  # [수정] 대각선 아래(중앙)를 바라보도록 설정
+                'yaw': 0, 'fov': 60, 'color': (255,120,100)
+            },
+            'cam0': {
+                'pos': np.array([car_cx, car_cy+150]),     # 차량 후방 중앙
+                'h': 105, 'focal': 950, 
+                'map_angle': -90, # [수정] 위(차량 뒤쪽 방향)를 바라보도록 설정
+                'yaw': 0, 'fov': 60, 'color': (100,120,255)
+            }
         }
-        self.dist_gain, self.angle_gain, self.alpha = 1.03, 1.56, 0.75
+
+        self.dist_gain, self.angle_gain, self.alpha = 1.03, 1.56, 0.3
         self.detector = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_250), cv2.aruco.DetectorParameters())
         
         # 차량
@@ -451,35 +463,39 @@ class CompactTracker:
                     )
                     
                     if ret:
+                        # 거리 계산
                         z_dist = tvec[2][0]
                         x_offset = tvec[0][0]
                         d = z_dist * (1 + (self.dist_gain - 1) * (z_dist / 500))
                         
+                        # [각도 수정] 카메라 광선(Ray)의 수평 각도 계산
                         ray_angle = math.atan2(x_offset, z_dist)
-                        cam_global_angle = math.radians(cfg['map_angle'] + cfg['yaw'])
-                        t_rad = cam_global_angle + ray_angle
+                        # 카메라가 설치된 절대 각도
+                        cam_global_angle = math.radians(cfg['map_angle']) 
                         
+                        # 마커의 지도상 위치 결정
+                        t_rad = cam_global_angle + ray_angle
                         pos = cfg['pos'] + np.array([
                             d * self.map_scale * math.cos(t_rad), 
                             d * self.map_scale * math.sin(t_rad)
                         ])
                         
-                        # 5. 헤딩(Yaw) 계산
+                        # [각도 수정] 헤딩(Yaw) 계산 로직 정밀화
                         R, _ = cv2.Rodrigues(rvec)
+                        # 카메라 좌표계 기준 마커의 회전량 추출
+                        local_yaw = math.atan2(R[1, 0], R[0, 0])
                         
-                        sy = math.sqrt(R[0, 0] * R[0, 0] + R[1, 0] * R[1, 0])
-                        if sy < 1e-6:
-                            local_yaw = math.atan2(-R[1, 2], R[1, 1])
-                        else:
-                            local_yaw = math.atan2(R[1, 0], R[0, 0])
+                        # 지도 좌표계로 변환 (카메라 설치각 + 마커 자체 회전 + 보정값)
+                        # +math.pi/2 는 마커가 카메라를 정면으로 볼 때를 기준으로 정렬하기 위함입니다.
+                        h = cam_global_angle + local_yaw + (math.pi / 2)
                         
-                        # [핵심 수정] 180도(math.pi)를 더해서 방향 반전 해결
-                        # 기존: h = cam_global_angle + local_yaw
-                        h = cam_global_angle + local_yaw + math.pi
-                        
-                        # 후방 마커 ID 체크 (기존 로직 유지)
+                        # 마커 ID 1번(뒷면)일 경우 180도 반전
                         if ids[0][0] == 1: h += math.pi 
                         
+                        # 각도 정규화 (-pi ~ pi)
+                        h = (h + math.pi) % (2 * math.pi) - math.pi
+                        
+                        # 중앙 신뢰도 기반 가중치
                         rel_x = (np.mean(corners[0][:, 0, 0]) - w_img/2) / (w_img/2)
                         weight = max(0.1, 1.0 - abs(rel_x))
                         
