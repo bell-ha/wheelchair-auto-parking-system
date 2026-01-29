@@ -33,7 +33,15 @@ def normalize_deg_0_360(d):
 class IntegratedWheelchairMapTracker:
     def __init__(self):
         # ====== 맵/물리 ======
-        self.marker_h_cm = 72.0
+        # (기존) 마커 높이 하나로 쓰던 값은 "기본값"으로만 남겨둠
+        self.marker_h_cm_default = 72.0
+
+        # ✅ [추가] ID별 마커 높이 반영
+        # ID 0 = 앞(70cm), ID 1 = 뒤(56cm)
+        self.marker_h_cm_by_id = {
+            0: 70.0,
+            1: 56.0
+        }
 
         self.map_w, self.map_h = 1000, 1000
         self.grid_w, self.grid_h = 600, 720
@@ -254,7 +262,10 @@ class IntegratedWheelchairMapTracker:
             tvec = tvec.reshape(3)
             dist_m = float(np.linalg.norm(tvec))
 
-            dh_m = abs(cfg["h_cm"] - self.marker_h_cm) / 100.0
+            # ✅ [핵심 변경] ID별 마커 높이 반영
+            marker_h_cm = float(self.marker_h_cm_by_id.get(mid, self.marker_h_cm_default))
+            dh_m = abs(cfg["h_cm"] - marker_h_cm) / 100.0
+
             ground_m = math.sqrt(max(0.0, dist_m * dist_m - dh_m * dh_m))
             ground_cm = ground_m * 100.0 * self.dist_gain
 
@@ -295,10 +306,12 @@ class IntegratedWheelchairMapTracker:
             # 모니터 표시 (축 경고가 싫으면 이 라인만 주석 처리)
             cv2.drawFrameAxes(monitor_frame, K, None, rvec, tvec, 0.07)
             bx, by = int(c[0][0]), int(c[0][1])
-            cv2.putText(monitor_frame,
-                        f"{cfg['name']} ID:{mid} yaw:{final_yaw_compass:6.1f} (w:{weight:.2f})",
-                        (bx, by - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            cv2.putText(
+                monitor_frame,
+                f"{cfg['name']} ID:{mid} yaw:{final_yaw_compass:6.1f} h:{marker_h_cm:.0f}cm (w:{weight:.2f})",
+                (bx, by - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2
+            )
 
             results.append({
                 "marker_id": mid,
@@ -311,7 +324,8 @@ class IntegratedWheelchairMapTracker:
                     "ground_cm": ground_cm,
                     "bearing_deg": bearing_deg,
                     "ray_deg": ray_deg,
-                    "final_yaw_compass": final_yaw_compass
+                    "final_yaw_compass": final_yaw_compass,
+                    "marker_h_cm": marker_h_cm
                 }
             })
 
