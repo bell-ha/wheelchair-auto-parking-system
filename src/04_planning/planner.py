@@ -2,6 +2,11 @@ import cv2
 import numpy as np
 import math
 import heapq
+K = np.array([[601.71923257, 0.0, 630.47700714],
+              [0.0, 601.34529853, 367.21223657],
+              [0.0, 0.0, 1.0]], dtype=np.float32)
+
+D = np.array([-0.18495647, 0.02541005, -0.01068433, 0.00321714], dtype=np.float32)
 
 class CompactTracker:
     def __init__(self):
@@ -11,27 +16,15 @@ class CompactTracker:
         self.off_x, self.off_y = 200, 150
         self.map_scale = 0.5
         self.wc_w, self.wc_l = 57.0, 100.0
-        car_cx, car_cy = self.off_x + self.grid_w/2, self.off_y + self.grid_h/2
-
+        
         # 마커 및 카메라
         self.marker_size, self.marker_h = 25.0, 72.0
         car_cx, car_cy = self.off_x + self.grid_w/2, self.off_y + self.grid_h/2
         self.cams = {
-            'cam1': {
-                'pos': np.array([car_cx-250, car_cy-350]), # 왼쪽 상단 구석 위치
-                'h': 110, 'focal': 950, 
-                'map_angle': 45,  # [수정] 대각선 아래(중앙)를 바라보도록 설정
-                'yaw': 0, 'fov': 60, 'color': (255,120,100)
-            },
-            'cam0': {
-                'pos': np.array([car_cx, car_cy+150]),     # 차량 후방 중앙
-                'h': 105, 'focal': 950, 
-                'map_angle': -90, # [수정] 위(차량 뒤쪽 방향)를 바라보도록 설정
-                'yaw': 0, 'fov': 60, 'color': (100,120,255)
-            }
+            'cam1': {'pos': np.array([car_cx-140, car_cy-135]), 'h': 110, 'focal': 950, 'map_angle': 157, 'yaw': 1, 'fov': 45, 'color': (255,120,100)},
+            'cam0': {'pos': np.array([car_cx+1.4, car_cy+170]), 'h': 105, 'focal': 950, 'map_angle': 90, 'yaw': 1, 'fov': 45, 'color': (100,120,255)}
         }
-
-        self.dist_gain, self.angle_gain, self.alpha = 1.03, 1.56, 0.3
+        self.dist_gain, self.angle_gain, self.alpha = 2.0, 1.56, 0.75
         self.detector = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_250), cv2.aruco.DetectorParameters())
         
         # 차량
@@ -116,7 +109,7 @@ class CompactTracker:
     
     def is_obstacle(self, px, py):
         # 휠체어의 안전 반경 (휠체어 폭의 절반 + 여유분)
-        safe_margin = (self.wc_w * self.map_scale / 2) + 30 
+        safe_margin = (self.wc_w * self.map_scale / 2) + 15 
         
         # 1. 차량 장애물 (마진 포함)
         if (self.car_x - safe_margin) <= px <= (self.car_x + self.car_dim[0] + safe_margin) and \
@@ -162,7 +155,7 @@ class CompactTracker:
         # ALLOWED_SLOPE: Y축(수직) 기준 좌우로 허용할 최대 각도 (예: 30도)
         # 30도 이상 옆으로 누운 대각선은 페널티를 받게 됩니다.
         ALLOWED_SLOPE = math.radians(20) 
-        SLOPE_PENALTY_WEIGHT = 200.0 
+        SLOPE_PENALTY_WEIGHT = 50.0 
 
         open_l = []
         heapq.heappush(open_l, (0, sn, (0, 0)))
@@ -430,73 +423,74 @@ class CompactTracker:
             mon0 = self.f0.copy() if self.f0 is not None else np.zeros((360,640,3), np.uint8)
             mon1 = self.f1.copy() if self.f1 is not None else np.zeros((360,640,3), np.uint8)
 
-            for frame, mon, side in [(self.f0, mon0, 'cam0'), (self.f1, mon1, 'cam1')]:
+            for frame, side in [(self.f0, 'cam0'), (self.f1, 'cam1')]:
                 if frame is None: continue
                 corners, ids, _ = self.detector.detectMarkers(frame)
                 
                 if ids is not None:
                     cfg = self.cams[side]
                     
-                    # 1. 가상 카메라 매트릭스
-                    h_img, w_img = frame.shape[:2]
-                    focal_len = cfg.get('focal', w_img)
-                    cam_matrix = np.array([
-                        [focal_len, 0, w_img / 2.0],
-                        [0, focal_len, h_img / 2.0],
-                        [0, 0, 1]
-                    ], dtype=np.float32)
-                    dist_coeffs = np.zeros((4,1))
+                    # 1. 실제 캘리브레이션 데이터 적용 (K, D 사용)
+                    # corners[0]의 shape은 (1, 4, 2)이므로 reshape 필요
+                    pts_2d = corners[0].reshape(-1, 1, 2)
                     
-                    # 2. 3D 마커 객체 좌표
+                    # 렌즈 왜곡 보정 (Fisheye 모델인 경우)
+                    undistorted_pts = cv2.fisheye.undistortPoints(pts_2d, K, D, P=K)
+                    
+                    # 2. 3D 마커 객체 좌표 (미터 단위 권장이나 기존 cm 유지 시 결과도 cm)
                     ms = self.marker_size
                     obj_points = np.array([
-                        [-ms/2, ms/2, 0],
-                        [ms/2, ms/2, 0],
-                        [ms/2, -ms/2, 0],
+                        [-ms/2,  ms/2, 0],
+                        [ ms/2,  ms/2, 0],
+                        [ ms/2, -ms/2, 0],
                         [-ms/2, -ms/2, 0]
                     ], dtype=np.float32)
                     
-                    # 3. SolvePnP (IPPE_SQUARE)
+                    # 3. SolvePnP (IPPE_SQUARE 플래그 사용으로 회전 시 튐 방지)
+                    # 왜곡 보정된 점(undistorted_pts)을 넣으므로 distCoeffs는 None
                     ret, rvec, tvec = cv2.solvePnP(
-                        obj_points, corners[0], cam_matrix, dist_coeffs, 
+                        obj_points, undistorted_pts, K, None, 
                         flags=cv2.SOLVEPNP_IPPE_SQUARE
                     )
                     
                     if ret:
-                        # 거리 계산
-                        z_dist = tvec[2][0]
-                        x_offset = tvec[0][0]
-                        d = z_dist * (1 + (self.dist_gain - 1) * (z_dist / 500))
+                        tvec = tvec.flatten()
+                        x_offset, y_offset, z_dist = tvec
                         
-                        # [각도 수정] 카메라 광선(Ray)의 수평 각도 계산
+                        # 거리 보정 (dist_gain 적용)
+                        d_raw = np.linalg.norm(tvec)
+                        d = d_raw * (1 + (self.dist_gain - 1) * (d_raw / 500))
+                        
+                        # 바닥 거리 계산 (피타고라스)
+                        dh = abs(cfg['h'] - self.marker_h)
+                        ground_d = math.sqrt(max(0, d**2 - dh**2))
+                        
+                        # 4. 글로벌 좌표 변환
+                        # 카메라가 바라보는 상대적인 각도(bearing) 계산
                         ray_angle = math.atan2(x_offset, z_dist)
-                        # 카메라가 설치된 절대 각도
-                        cam_global_angle = math.radians(cfg['map_angle']) 
-                        
-                        # 마커의 지도상 위치 결정
+                        cam_global_angle = math.radians(cfg['map_angle'] + cfg['yaw'])
                         t_rad = cam_global_angle + ray_angle
+                        
                         pos = cfg['pos'] + np.array([
-                            d * self.map_scale * math.cos(t_rad), 
-                            d * self.map_scale * math.sin(t_rad)
+                            ground_d * self.map_scale * math.cos(t_rad), 
+                            ground_d * self.map_scale * math.sin(t_rad)
                         ])
                         
-                        # [각도 수정] 헤딩(Yaw) 계산 로직 정밀화
+                        # 5. 헤딩(Yaw) 계산
                         R, _ = cv2.Rodrigues(rvec)
-                        # 카메라 좌표계 기준 마커의 회전량 추출
-                        local_yaw = math.atan2(R[1, 0], R[0, 0])
+                        sy = math.sqrt(R[0, 0]**2 + R[1, 0]**2)
                         
-                        # 지도 좌표계로 변환 (카메라 설치각 + 마커 자체 회전 + 보정값)
-                        # +math.pi/2 는 마커가 카메라를 정면으로 볼 때를 기준으로 정렬하기 위함입니다.
-                        h = cam_global_angle + local_yaw + (math.pi / 2)
+                        if sy < 1e-6:
+                            local_yaw = math.atan2(-R[1, 2], R[1, 1])
+                        else:
+                            local_yaw = math.atan2(R[1, 0], R[0, 0])
                         
-                        # 마커 ID 1번(뒷면)일 경우 180도 반전
-                        if ids[0][0] == 1: h += math.pi 
+                        # 방향 보정 및 마커 ID별 반전 로직
+                        h = cam_global_angle + local_yaw + math.pi
+                        if ids[0][0] == 1: h += math.pi # 후방 마커 Flip
                         
-                        # 각도 정규화 (-pi ~ pi)
-                        h = (h + math.pi) % (2 * math.pi) - math.pi
-                        
-                        # 중앙 신뢰도 기반 가중치
-                        rel_x = (np.mean(corners[0][:, 0, 0]) - w_img/2) / (w_img/2)
+                        # 가중치 계산 (중심부 신뢰)
+                        rel_x = (np.mean(corners[0][:, 0, 0]) - frame.shape[1]/2) / (frame.shape[1]/2)
                         weight = max(0.1, 1.0 - abs(rel_x))
                         
                         detected_data.append((pos, h, weight))
