@@ -18,7 +18,7 @@ class CompactTracker:
         self.wc_w, self.wc_l = 57.0, 100.0
         
         # 마커 및 카메라
-        self.marker_size, self.marker_h = 17.0, 72.0
+        self.marker_size, self.marker_h = 25.0, 72.0
         car_cx, car_cy = self.off_x + self.grid_w/2, self.off_y + self.grid_h/2
         self.cams = {
             'cam1': {'pos': np.array([car_cx-140, car_cy-135]), 'h': 110, 'focal': 950, 'map_angle': 157, 'yaw': 1, 'fov': 45, 'color': (255,120,100)},
@@ -57,8 +57,8 @@ class CompactTracker:
         self.dynamic_obstacles = []  # [(x, y, radius), ...]
         
         # 영상
-        self.cap0 = cv2.VideoCapture(0)
-        self.cap1 = cv2.VideoCapture(1)
+        self.cap0 = cv2.VideoCapture('rear_1.mp4')
+        self.cap1 = cv2.VideoCapture('left_1.mp4')
         self.total_frames = int(min(self.cap0.get(cv2.CAP_PROP_FRAME_COUNT), self.cap1.get(cv2.CAP_PROP_FRAME_COUNT)))
         
         self.win_name = "Compact Tracker"
@@ -406,7 +406,7 @@ class CompactTracker:
                    0, 0.4, (255,200,100), 1)
     
     def run(self):
-        play = True
+        play = False
         while True:
             if play:
                 ret0, self.f0 = self.cap0.read()

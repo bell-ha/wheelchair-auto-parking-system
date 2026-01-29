@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import math
+from collections import deque
 
 # ==========================================
 # 1) 공통 Intrinsic (사용자 제공)
@@ -30,18 +31,18 @@ def normalize_deg_0_360(d):
     return d if d >= 0 else d + 360.0
 
 
-class IntegratedWheelchairMapTracker:
-    def __init__(self):
-        # ====== 맵/물리 ======
-        # (기존) 마커 높이 하나로 쓰던 값은 "기본값"으로만 남겨둠
-        self.marker_h_cm_default = 72.0
+class IntegratedWheelchairMapTrackerLive:
+    def __init__(self,
+                 rear_cam_index=0,
+                 left_cam_index=1,
+                 frame_w=1280,
+                 frame_h=720,
+                 fps=30):
 
-        # ✅ [추가] ID별 마커 높이 반영
+        # ====== 맵/물리 ======
+        self.marker_h_cm_default = 72.0
         # ID 0 = 앞(70cm), ID 1 = 뒤(56cm)
-        self.marker_h_cm_by_id = {
-            0: 70.0,
-            1: 56.0
-        }
+        self.marker_h_cm_by_id = {0: 70.0, 1: 56.0}
 
         self.map_w, self.map_h = 1000, 1000
         self.grid_w, self.grid_h = 600, 720
@@ -51,22 +52,28 @@ class IntegratedWheelchairMapTracker:
         self.wc_w_cm, self.wc_l_cm = 57.0, 100.0
         self.half_len_px = (self.wc_l_cm / 2.0) * self.map_scale
 
-        # 상태(중심 기준으로 유지)
+        # 상태(중심 기준)
         self.center_pos = None
         self.heading_angle = 0.0  # map rad
         self.is_initialized = False
 
-        # 영상
-        self.cap_rear = cv2.VideoCapture("rear.mp4")
-        self.cap_left = cv2.VideoCapture("left.mp4")
-        self.total_frames = int(min(
-            self.cap_rear.get(cv2.CAP_PROP_FRAME_COUNT),
-            self.cap_left.get(cv2.CAP_PROP_FRAME_COUNT)
-        ))
-        self.curr_rear = None
-        self.curr_left = None
+        # ====== 라이브 카메라 ======
+        self.cap_rear = cv2.VideoCapture(rear_cam_index)
+        self.cap_left = cv2.VideoCapture(left_cam_index)
 
-        # 카메라 파라미터
+        for cap in (self.cap_rear, self.cap_left):
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, frame_w)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_h)
+            cap.set(cv2.CAP_PROP_FPS, fps)
+
+        ok0, fr0 = self.cap_rear.read()
+        ok1, fr1 = self.cap_left.read()
+        if not ok0 or not ok1:
+            raise RuntimeError("카메라 프레임을 읽지 못했습니다. 인덱스(0/1) 또는 카메라 연결 상태를 확인하세요.")
+        self.curr_rear = fr0
+        self.curr_left = fr1
+
+        # ====== 카메라 파라미터 ======
         self.cams = {
             "rear": {
                 "name": "Rear",
@@ -96,17 +103,7 @@ class IntegratedWheelchairMapTracker:
             }
         }
 
-        # 기본값(어차피 아래 UI 초기값으로 덮어씀)
-        self.alpha = 0.75
-        self.dist_gain = 1.00
-
-        # ==========================================
-        # UI (초기값: 스샷 기준)
-        # ==========================================
-        self.win_name = "Integrated Wheelchair Tracker (ID0 front / ID1 rear)"
-        cv2.namedWindow(self.win_name, cv2.WINDOW_NORMAL)
-
-        INIT_FRAME = 1478
+        # ====== 기본값(스샷 기준 초기값) ======
         INIT_SMOOTH = 100          # alpha=1.00
         INIT_DISTGAIN = 188        # dist_gain=1.88
         INIT_REAR_MAPYAW = 93      # yaw_trim_deg = +3
@@ -116,11 +113,8 @@ class IntegratedWheelchairMapTracker:
         INIT_REAR_INSTANGLE = 0
         INIT_LEFT_INSTANGLE = 113
         INIT_REAR_INSTOFFSET_X10 = 0
-        INIT_LEFT_INSTOFFSET_X10 = 508   # 50.8 (50.84 근사)
+        INIT_LEFT_INSTOFFSET_X10 = 508   # 50.8
 
-        INIT_FRAME = int(max(0, min(INIT_FRAME, self.total_frames - 1)))
-
-        # 내부 변수 동기화
         self.alpha = max(0.01, INIT_SMOOTH / 100.0)
         self.dist_gain = max(0.01, INIT_DISTGAIN / 100.0)
 
@@ -136,43 +130,56 @@ class IntegratedWheelchairMapTracker:
         self.cams["rear"]["install_offset"] = INIT_REAR_INSTOFFSET_X10 / 10.0
         self.cams["left"]["install_offset"] = INIT_LEFT_INSTOFFSET_X10 / 10.0
 
-        # 트랙바 생성(초기값 반영)
-        cv2.createTrackbar("Frame", self.win_name, INIT_FRAME, max(0, self.total_frames - 1), self.on_frame_change)
+        # ==========================================
+        # ✅ 15프레임 각도 원형 평균 버퍼
+        # ==========================================
+        self.HEADING_WIN = 15
+        self.rear_heading_hist = deque(maxlen=self.HEADING_WIN)   # (rad, weight)
+        self.left_heading_hist = deque(maxlen=self.HEADING_WIN)
+        self.fused_heading_hist = deque(maxlen=self.HEADING_WIN)
+
+        # ====== UI (라이브용: Freeze 추가) ======
+        self.win_name = "Integrated Wheelchair Tracker LIVE (ID0 front / ID1 rear)"
+        cv2.namedWindow(self.win_name, cv2.WINDOW_NORMAL)
+
+        cv2.createTrackbar("Freeze(0=LIVE,1=HOLD)", self.win_name, 0, 1, lambda v: None)
         cv2.createTrackbar("Smooth(%)", self.win_name, INIT_SMOOTH, 100, self.on_alpha)
-        cv2.createTrackbar("DistGain(%)", self.win_name, INIT_DISTGAIN, 200, self.on_dist_gain)
+        cv2.createTrackbar("DistGain(%)", self.win_name, INIT_DISTGAIN, 300, self.on_dist_gain)
 
         cv2.createTrackbar("Rear_MapYaw", self.win_name, INIT_REAR_MAPYAW, 180,
                            lambda v: self.set_cam("rear", "yaw_trim_deg", v - 90))
         cv2.createTrackbar("Left_MapYaw", self.win_name, INIT_LEFT_MAPYAW, 180,
                            lambda v: self.set_cam("left", "yaw_trim_deg", v - 90))
 
-        cv2.createTrackbar("Rear_Sens(x10)", self.win_name, INIT_REAR_SENS_X10, 30,
-                           lambda v: self.set_cam("rear", "sens", v / 10.0))
-        cv2.createTrackbar("Left_Sens(x10)", self.win_name, INIT_LEFT_SENS_X10, 30,
-                           lambda v: self.set_cam("left", "sens", v / 10.0))
+        cv2.createTrackbar("Rear_Sens(x10)", self.win_name, INIT_REAR_SENS_X10, 60,
+                           lambda v: self.set_cam("rear", "sens", max(0.1, v / 10.0)))
+        cv2.createTrackbar("Left_Sens(x10)", self.win_name, INIT_LEFT_SENS_X10, 60,
+                           lambda v: self.set_cam("left", "sens", max(0.1, v / 10.0)))
 
         cv2.createTrackbar("Rear_InstAngle", self.win_name, INIT_REAR_INSTANGLE, 180,
                            lambda v: self.set_cam("rear", "install_angle", float(v)))
         cv2.createTrackbar("Left_InstAngle", self.win_name, INIT_LEFT_INSTANGLE, 180,
                            lambda v: self.set_cam("left", "install_angle", float(v)))
 
-        cv2.createTrackbar("Rear_InstOffset(x10)", self.win_name, INIT_REAR_INSTOFFSET_X10, 1800,
+        cv2.createTrackbar("Rear_InstOffset(x10)", self.win_name, INIT_REAR_INSTOFFSET_X10, 3600,
                            lambda v: self.set_cam("rear", "install_offset", v / 10.0))
-        cv2.createTrackbar("Left_InstOffset(x10)", self.win_name, INIT_LEFT_INSTOFFSET_X10, 1800,
+        cv2.createTrackbar("Left_InstOffset(x10)", self.win_name, INIT_LEFT_INSTOFFSET_X10, 3600,
                            lambda v: self.set_cam("left", "install_offset", v / 10.0))
 
-        # 시작 프레임 로드
-        self.on_frame_change(INIT_FRAME)
+        # 첫 프레임
+        self.grab_frames()
+
+    # -------------------------
+    # Live grab
+    # -------------------------
+    def grab_frames(self):
+        r0, self.curr_rear = self.cap_rear.read()
+        r1, self.curr_left = self.cap_left.read()
+        return (r0 and r1 and self.curr_rear is not None and self.curr_left is not None)
 
     # -------------------------
     # Trackbar callbacks
     # -------------------------
-    def on_frame_change(self, v):
-        self.cap_rear.set(cv2.CAP_PROP_POS_FRAMES, v)
-        self.cap_left.set(cv2.CAP_PROP_POS_FRAMES, v)
-        _, self.curr_rear = self.cap_rear.read()
-        _, self.curr_left = self.cap_left.read()
-
     def on_alpha(self, v):
         self.alpha = max(0.01, v / 100.0)
 
@@ -183,18 +190,38 @@ class IntegratedWheelchairMapTracker:
         self.cams[cam_key][key] = float(val)
 
     # -------------------------
+    # Circular mean (weighted)
+    # -------------------------
+    @staticmethod
+    def circular_mean_weighted(angle_weight_list):
+        """
+        angle_weight_list: [(rad, w), ...]
+        return: mean rad in [-pi, pi]
+        """
+        if not angle_weight_list:
+            return None
+        s = 0.0
+        c = 0.0
+        for ang, w in angle_weight_list:
+            s += math.sin(ang) * w
+            c += math.cos(ang) * w
+        if abs(s) < 1e-9 and abs(c) < 1e-9:
+            return None
+        return math.atan2(s, c)
+
+    # -------------------------
     # Draw map
     # -------------------------
     def draw_static_map(self, img):
         step = int(20 * self.map_scale * 2)
         for x in range(0, self.grid_w + 1, step):
-            c = (45, 45, 45) if x % 100 != 0 else (80, 80, 80)
+            col = (45, 45, 45) if x % 100 != 0 else (80, 80, 80)
             cv2.line(img, (self.off_x + x, self.off_y),
-                     (self.off_x + x, self.off_y + self.grid_h), c, 1)
+                     (self.off_x + x, self.off_y + self.grid_h), col, 1)
         for y in range(0, self.grid_h + 1, step):
-            c = (45, 45, 45) if y % 100 != 0 else (80, 80, 80)
+            col = (45, 45, 45) if y % 100 != 0 else (80, 80, 80)
             cv2.line(img, (self.off_x, self.off_y + y),
-                     (self.off_x + self.grid_w, self.off_y + y), c, 1)
+                     (self.off_x + self.grid_w, self.off_y + y), col, 1)
 
         cv2.rectangle(img, (200 + self.off_x, 180 + self.off_y),
                       (400 + self.off_x, 540 + self.off_y), (35, 35, 45), -1)
@@ -204,7 +231,7 @@ class IntegratedWheelchairMapTracker:
         for cfg in self.cams.values():
             cp = tuple(cfg["pos_px"].astype(int))
             cv2.circle(img, cp, 7, cfg["color"], -1)
-            cv2.putText(img, cfg["name"], (cp[0]-25, cp[1]+25),
+            cv2.putText(img, cfg["name"], (cp[0] - 25, cp[1] + 25),
                         0, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
 
     # -------------------------
@@ -224,10 +251,9 @@ class IntegratedWheelchairMapTracker:
         """
         dx = self.half_len_px * math.cos(heading_map_rad)
         dy = self.half_len_px * math.sin(heading_map_rad)
-
-        if marker_id == 0:   # front marker
+        if marker_id == 0:
             return marker_pos_px - np.array([dx, dy], dtype=np.float32)
-        else:                # rear marker (id==1)
+        else:
             return marker_pos_px + np.array([dx, dy], dtype=np.float32)
 
     # -------------------------
@@ -246,7 +272,7 @@ class IntegratedWheelchairMapTracker:
         for i in range(len(ids)):
             mid = int(ids[i][0])
             if mid not in (0, 1):
-                continue  # 반드시 앞=0, 뒤=1만 사용
+                continue
 
             c = corners[i].reshape(4, 2)
 
@@ -262,7 +288,7 @@ class IntegratedWheelchairMapTracker:
             tvec = tvec.reshape(3)
             dist_m = float(np.linalg.norm(tvec))
 
-            # ✅ [핵심 변경] ID별 마커 높이 반영
+            # ✅ ID별 마커 높이 반영
             marker_h_cm = float(self.marker_h_cm_by_id.get(mid, self.marker_h_cm_default))
             dh_m = abs(cfg["h_cm"] - marker_h_cm) / 100.0
 
@@ -282,7 +308,7 @@ class IntegratedWheelchairMapTracker:
 
             # yaw 계산(사용자 수식) + ID1이면 180° flip
             rmat, _ = cv2.Rodrigues(rvec)
-            sy = math.sqrt(rmat[0, 0]**2 + rmat[1, 0]**2)
+            sy = math.sqrt(rmat[0, 0] ** 2 + rmat[1, 0] ** 2)
             raw_yaw = math.atan2(-rmat[2, 0], sy) * 180.0 / math.pi
 
             current_total = (raw_yaw * cfg["sens"]) + cfg["install_angle"]
@@ -293,17 +319,16 @@ class IntegratedWheelchairMapTracker:
 
             heading_map_rad = self.compass_deg_to_map_rad(final_yaw_compass)
 
-            # marker -> center 변환
             center_pos = self.marker_to_center(marker_pos, heading_map_rad, mid)
 
-            # 가중치
+            # 가중치(중심 + 거리)
             cx = float(np.mean(c[:, 0]))
             rel_x = (cx - frame.shape[1] / 2) / (frame.shape[1] / 2)
             w_center = max(0.1, 1.0 - abs(rel_x))
             w_dist = 1.0 / (1.0 + ground_m)
             weight = float(max(0.05, w_center * w_dist))
 
-            # 모니터 표시 (축 경고가 싫으면 이 라인만 주석 처리)
+            # 모니터 표시
             cv2.drawFrameAxes(monitor_frame, K, None, rvec, tvec, 0.07)
             bx, by = int(c[0][0]), int(c[0][1])
             cv2.putText(
@@ -379,23 +404,15 @@ class IntegratedWheelchairMapTracker:
         return avg_center, avg_heading, total_w
 
     # -------------------------
-    # Main loop
+    # Main loop (LIVE)
     # -------------------------
     def run(self):
-        play = False
-
         while True:
-            if play:
-                r0, self.curr_rear = self.cap_rear.read()
-                r1, self.curr_left = self.cap_left.read()
-                if not r0 or not r1:
-                    self.on_frame_change(0)
+            freeze = cv2.getTrackbarPos("Freeze(0=LIVE,1=HOLD)", self.win_name)
+
+            if freeze == 0:
+                if not self.grab_frames():
                     continue
-                curr_pos = int(self.cap_rear.get(cv2.CAP_PROP_POS_FRAMES))
-                cv2.setTrackbarPos("Frame", self.win_name, min(curr_pos, self.total_frames - 1))
-            else:
-                target = cv2.getTrackbarPos("Frame", self.win_name)
-                self.on_frame_change(target)
 
             m_map = np.ones((self.map_h, self.map_w, 3), dtype=np.uint8) * 15
             self.draw_static_map(m_map)
@@ -425,7 +442,7 @@ class IntegratedWheelchairMapTracker:
                 cv2.putText(m_map, f"ID{d['marker_id']}", (mp[0] + 6, mp[1] - 6),
                             0, 0.45, (255, 255, 0), 1, cv2.LINE_AA)
 
-            # 카메라별 휠체어(파랑/빨강)
+            # 카메라별 휠체어(파랑/빨강) + ✅ 15프레임 각도 평균 적용
             rear_list = [d for d in detected if d["cam_key"] == "rear"]
             left_list = [d for d in detected if d["cam_key"] == "left"]
 
@@ -433,32 +450,48 @@ class IntegratedWheelchairMapTracker:
             left_est = self.fuse_estimates(left_list)
 
             if rear_est is not None:
-                r_center, r_head, r_w = rear_est
+                r_center, r_head_inst, r_w = rear_est
+                if freeze == 0:
+                    self.rear_heading_hist.append((r_head_inst, r_w))
+                r_head = self.circular_mean_weighted(self.rear_heading_hist) or r_head_inst
+
                 self.render_wheelchair(m_map, r_center, r_head,
                                        body_color=(255, 0, 0), front_color=(255, 255, 255),
                                        thickness=2, label=f"REAR (w:{r_w:.2f})")
 
             if left_est is not None:
-                l_center, l_head, l_w = left_est
+                l_center, l_head_inst, l_w = left_est
+                if freeze == 0:
+                    self.left_heading_hist.append((l_head_inst, l_w))
+                l_head = self.circular_mean_weighted(self.left_heading_hist) or l_head_inst
+
                 self.render_wheelchair(m_map, l_center, l_head,
                                        body_color=(0, 0, 255), front_color=(255, 255, 255),
                                        thickness=2, label=f"LEFT (w:{l_w:.2f})")
 
-            # 최종 통합 + 스무딩
+            # 최종 통합 + ✅ 15프레임 각도 평균 적용
             if len(detected) > 0:
                 total_w = sum(x["weight"] for x in detected)
                 avg_center = sum(x["center_pos"] * x["weight"] for x in detected) / total_w
+
                 avg_sin = sum(math.sin(x["heading"]) * x["weight"] for x in detected) / total_w
                 avg_cos = sum(math.cos(x["heading"]) * x["weight"] for x in detected) / total_w
-                avg_heading = math.atan2(avg_sin, avg_cos)
+                avg_heading_inst = math.atan2(avg_sin, avg_cos)
 
-                if play and self.is_initialized:
+                if freeze == 0:
+                    self.fused_heading_hist.append((avg_heading_inst, total_w))
+                avg_heading_win = self.circular_mean_weighted(self.fused_heading_hist) or avg_heading_inst
+
+                if self.is_initialized:
+                    # 위치는 기존 alpha로
                     self.center_pos = self.center_pos * (1 - self.alpha) + avg_center * self.alpha
-                    diff = (avg_heading - self.heading_angle + math.pi) % (2 * math.pi) - math.pi
+
+                    # 각도는 15프레임 평균값 기준으로 diff 적용
+                    diff = (avg_heading_win - self.heading_angle + math.pi) % (2 * math.pi) - math.pi
                     self.heading_angle += diff * self.alpha
                 else:
                     self.center_pos = avg_center
-                    self.heading_angle = avg_heading
+                    self.heading_angle = avg_heading_win
                     self.is_initialized = True
 
             # 통합 휠체어(초록)
@@ -473,11 +506,17 @@ class IntegratedWheelchairMapTracker:
             m1 = cv2.resize(mon_left, (640, 360)) if mon_left is not None else np.zeros((360, 640, 3), np.uint8)
             cv2.imshow("Monitor", np.hstack([m0, m1]))
 
-            key = cv2.waitKey(30) & 0xFF
-            if key == ord(' '):
-                play = not play
-            elif key == ord('q') or key == 27:
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q') or key == 27:
                 break
+            elif key == ord('c'):
+                # 리셋 + 버퍼도 같이 초기화
+                self.center_pos = None
+                self.heading_angle = 0.0
+                self.is_initialized = False
+                self.rear_heading_hist.clear()
+                self.left_heading_hist.clear()
+                self.fused_heading_hist.clear()
 
         self.cap_rear.release()
         self.cap_left.release()
@@ -485,4 +524,4 @@ class IntegratedWheelchairMapTracker:
 
 
 if __name__ == "__main__":
-    IntegratedWheelchairMapTracker().run()
+    IntegratedWheelchairMapTrackerLive(rear_cam_index=0, left_cam_index=1).run()
