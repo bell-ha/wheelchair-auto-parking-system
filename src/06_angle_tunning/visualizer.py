@@ -36,6 +36,39 @@ class Visualizer:
             (35, 35, 45), 
             -1
         )
+
+    def draw_car(self, img):
+        """차량 및 차량 주변 확장 구역 그리기"""
+        # 1. 기존 차량 그리기
+        cv2.rectangle(
+            img, 
+            (int(self.car_x), int(self.car_y)), 
+            (int(self.car_x + self.car_dim[0]), int(self.car_y + self.car_dim[1])), 
+            (35, 35, 45), 
+            -1
+        )
+
+        # 2. [추가] 차량 밖으로 600x720 사각형 그리기
+        # 차량의 중심을 기준으로 그릴지, 좌측 상단을 기준으로 그릴지에 따라 좌표가 달라집니다.
+        # 여기서는 차량 구역을 포함하도록 '확장 영역' 개념으로 중심 기준 계산을 적용해 보겠습니다.
+        
+        ext_w, ext_h = 600, 720
+        # 차량의 중심점 계산
+        car_center_x = self.car_x + self.car_dim[0] / 2
+        car_center_y = self.car_y + self.car_dim[1] / 2
+        
+        # 600x720 사각형의 좌상단(x1, y1) 및 우하단(x2, y2) 좌표 계산
+        x1 = int(car_center_x - ext_w / 2)
+        y1 = int(car_center_y - ext_h / 2)
+        x2 = int(car_center_x + ext_w / 2)
+        y2 = int(car_center_y + ext_h / 2)
+        
+        # 사각형 그리기 (연한 회색 점선 느낌의 실선)
+        cv2.rectangle(img, (x1, y1), (x2, y2), (60, 60, 60), 2)
+        
+        # 영역 이름 텍스트 (선택 사항)
+        cv2.putText(img, "Boundary (600x720)", (x1, y1 - 10), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 60, 60), 1)
     
     def draw_obstacles(self, img, obstacles):
         """동적 장애물 그리기"""
@@ -65,6 +98,24 @@ class Visualizer:
             col = (255, 100, 0) if i == exit_choice else (80, 80, 80)
             cv2.circle(img, gp, 8, col, -1 if i == exit_choice else 2)
     
+    def draw_angle_info(self, img, marker_pos, heading_angle):
+        """위를 0도로 기준 잡은 현재 각도 표시 (0~360도 체계)"""
+        # 1. 위(북향)를 0도로 설정 (시계 방향으로 증가)
+        # 라디안을 도로 변환 후 90도 보정
+        raw_deg = math.degrees(heading_angle) + 90
+        
+        # 2. 0~360도 범위로 변환 (모듈러 연산 활용)
+        # 음수 각도를 양수로 만들고 360으로 나눈 나머지를 취함
+        display_angle = raw_deg % 360
+        
+        # 3. 텍스트 출력
+        cv2.putText(
+            img, 
+            f"Angle(N=0): {display_angle:.1f}deg", 
+            (int(marker_pos[0]) + 50, int(marker_pos[1]) - 40),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1
+        )
+
     def draw_path(self, img, path, marker_pos, heading_angle):
         """경로 및 회전 정보 그리기"""
         if len(path) < 2:
