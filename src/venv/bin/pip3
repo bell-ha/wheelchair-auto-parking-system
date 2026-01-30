@@ -1,4 +1,4 @@
-#!/Users/jongha/Desktop/GitHub/wheelchair-auto-parking-system/src/venv/bin/python3.14
+#!/Users/jongha/Desktop/GitHub/wheelchair-auto-parking-system/src/venv/bin/python3.11
 import sys
 from pip._internal.cli.main import main
 if __name__ == '__main__':

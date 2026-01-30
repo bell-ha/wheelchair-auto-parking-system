@@ -55,7 +55,7 @@ class CompactTracker:
                 'map_scale': self.map_scale
             }
         }
-        self.dist_gain, self.angle_gain, self.alpha = 2.0, 1.56, 0.75
+        self.dist_gain, self.angle_gain, self.alpha = 2.0, 1.56, 0.25
         
         # 차량
         self.car_dim = [200, 360]
