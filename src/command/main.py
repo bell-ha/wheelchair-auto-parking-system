@@ -74,8 +74,8 @@ class CompactTracker:
                                      (self.car_x, self.car_y), self.wc_w, self.wc_l, self.map_scale)
         
         # 영상
-        self.cap0 = cv2.VideoCapture('../rear_1.mp4')
-        self.cap1 = cv2.VideoCapture('../left_1.mp4')
+        self.cap0 = cv2.VideoCapture('rear_1.mp4')
+        self.cap1 = cv2.VideoCapture('left_1.mp4')
         self.total_frames = int(min(self.cap0.get(cv2.CAP_PROP_FRAME_COUNT), 
                                    self.cap1.get(cv2.CAP_PROP_FRAME_COUNT)))
         
