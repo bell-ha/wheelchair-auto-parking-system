@@ -4,8 +4,8 @@ import math
 
 from planner import PathPlanner
 from tracker import PathTracker
-from localization import PoseEstimator
-from visualizer import Visualizer
+from localization import PoseEstimator  # 개선된 버전
+from visualizer import Visualizer  # 개선된 버전
 
 
 # 카메라 캘리브레이션 파라미터
@@ -28,11 +28,47 @@ class CompactTracker:
         # 마커 및 카메라
         self.marker_size, self.marker_h = 25.0, 72.0
         car_cx, car_cy = self.off_x + self.grid_w/2, self.off_y + self.grid_h/2
+        
+        # ===== 카메라 설정 (개선된 형식) =====
         self.cams = {
-            'cam1': {'pos': np.array([car_cx-140, car_cy-135]), 'h': 110, 'focal': 950, 'map_angle': 157, 'yaw': 1, 'fov': 45, 'color': (255,120,100), 'map_scale': self.map_scale},
-            'cam0': {'pos': np.array([car_cx+1.4, car_cy+170]), 'h': 105, 'focal': 950, 'map_angle': 90, 'yaw': 1, 'fov': 45, 'color': (100,120,255), 'map_scale': self.map_scale}
+            'cam1': {
+                'pos': np.array([car_cx-140, car_cy-135], dtype=np.float32),  # pos_px로도 사용
+                'h': 110.0,
+                'h_cm': 110.0,  # PoseEstimator용
+                'focal': 950,
+                'map_angle': 157.0,
+                'map_angle_deg': 157.0,  # PoseEstimator용
+                'yaw': 1.0,
+                'yaw_trim_deg': 1.0,  # PoseEstimator용
+                'fov': 45,
+                'color': (255, 120, 100),
+                'map_scale': self.map_scale,
+                'sens': 1.0,  # PoseEstimator용
+                'install_angle': 0.0,  # PoseEstimator용
+                'install_offset': 0.0  # PoseEstimator용
+            },
+            'cam0': {
+                'pos': np.array([car_cx+1.4, car_cy+170], dtype=np.float32),
+                'h': 105.0,
+                'h_cm': 105.0,
+                'focal': 950,
+                'map_angle': 90.0,
+                'map_angle_deg': 90.0,
+                'yaw': 1.0,
+                'yaw_trim_deg': 1.0,
+                'fov': 45,
+                'color': (100, 120, 255),
+                'map_scale': self.map_scale,
+                'sens': 1.0,
+                'install_angle': 0.0,
+                'install_offset': 0.0
+            }
         }
-        self.dist_gain, self.angle_gain, self.alpha = 2.0, 1.56, 0.75
+        
+        # PoseEstimator 파라미터
+        self.dist_gain = 2.0
+        self.alpha = 0.75
+        self.wc_l_cm = 100.0
         
         # 차량
         self.car_dim = [200, 360]
@@ -67,11 +103,22 @@ class CompactTracker:
         self.tracker.set_planner(self.planner)
         self.tracker.set_obstacle_checker(self.is_obstacle)
         
-        self.estimator = PoseEstimator(K, D, self.cams, self.marker_size, self.marker_h, 
-                                       self.dist_gain, self.alpha)
+        # ===== 개선된 PoseEstimator 초기화 =====
+        self.estimator = PoseEstimator(
+            K=K,
+            D=D,
+            cams=self.cams,
+            marker_size=self.marker_size,
+            marker_h = self.marker_h, 
+            dist_gain=self.dist_gain,
+            alpha=self.alpha
+        )
         
-        self.visualizer = Visualizer(self.map_w, self.map_h, self.car_dim, 
-                                     (self.car_x, self.car_y), self.wc_w, self.wc_l, self.map_scale)
+        # ===== 개선된 Visualizer 초기화 =====
+        self.visualizer = Visualizer(
+            self.map_w, self.map_h, self.car_dim,
+            (self.car_x, self.car_y), self.wc_w, self.wc_l, self.map_scale
+        )
         
         # 영상
         self.cap0 = cv2.VideoCapture('rear_1.mp4')
@@ -85,6 +132,12 @@ class CompactTracker:
         cv2.createTrackbar("Frame", self.win_name, 278, self.total_frames-1, self.on_frame)
         cv2.createTrackbar("Mode", self.win_name, 1, 1, self.on_mode)
         cv2.createTrackbar("ExitDir", self.win_name, 0, 1, self.on_exit)
+        
+        # ===== 시각화 토글 플래그 =====
+        self.show_camera_estimates = True  # 카메라별 추정치 표시
+        self.show_rays = True  # 레이 표시
+        self.show_debug = True  # 디버그 정보 표시
+        
         self.on_frame(278)
     
     def mouse_callback(self, event, x, y, flags, param):
@@ -189,7 +242,8 @@ class CompactTracker:
             return
         
         gpos, _ = self.get_goal()
-        self.tracker.update_path(self.estimator.marker_pos, self.estimator.heading_angle, gpos)
+        center_pos = self.estimator.get_center_position(self.wc_l, self.map_scale)
+        self.tracker.update_path(center_pos, self.estimator.heading_angle, gpos)
     
     def run(self):
         """메인 루프"""
@@ -219,42 +273,74 @@ class CompactTracker:
             mon0 = self.f0.copy() if self.f0 is not None else np.zeros((360,640,3), np.uint8)
             mon1 = self.f1.copy() if self.f1 is not None else np.zeros((360,640,3), np.uint8)
 
-            # 포즈 추정
+            # ===== 개선된 포즈 추정 (5개 값 반환) =====
             frames = {'cam0': self.f0, 'cam1': self.f1}
-            marker_pos, heading_angle, is_init = self.estimator.detect_and_estimate(frames)
+            center_pos, heading_angle, is_init, per_cam_est, det_all = \
+                self.estimator.detect_and_estimate(frames, self.dist_gain)
             
             if is_init:
-                center = self.estimator.get_center_position(self.wc_l, self.map_scale)
+                # 중심 위치 계산
+                if center_pos is None:
+                    center_pos = self.estimator.get_center_position(self.wc_l, self.map_scale)
                 
                 # 1. 목표 도달 및 경로 업데이트
                 if self.parking_mode and self.stage == 0:
-                    self.select_nearest(center)
-                if self.check_reached(center):
+                    self.select_nearest(center_pos)
+                if self.check_reached(center_pos):
                     self.advance()
                 self.update_path()
                 
-                # 2. [추가] 실시간 주행 명령 계산
-                # tracker에 compute_action 함수가 있다고 가정하거나 여기서 직접 호출
-                _, _, current_action = self.tracker.compute_action(center, heading_angle)
+                # 2. 주행 명령 계산
+                current_action = "WAITING"
+                if hasattr(self.tracker, 'compute_action'):
+                    _, _, current_action = self.tracker.compute_action(center_pos, heading_angle)
                 
-                # 3. 경로 및 휠체어 그리기
+                # ===== 3. 새로운 시각화 기능들 =====
+                
+                # 3-1. 카메라별 추정치 표시 (반투명 휠체어)
+                if self.show_camera_estimates:
+                    self.visualizer.draw_camera_estimates(img, per_cam_est, self.cams)
+                
+                # 3-2. 레이와 마커 표시
+                if self.show_rays:
+                    self.visualizer.draw_rays_and_markers(img, det_all, self.cams)
+                
+                # 3-3. 경로 표시
                 path = self.tracker.get_path()
                 if len(path) >= 2:
-                    self.visualizer.draw_path(img, path, marker_pos, heading_angle)
-                    self.visualizer.draw_stage_info(img, marker_pos, self.stage)
+                    self.visualizer.draw_path(img, path, center_pos, heading_angle)
+                    self.visualizer.draw_stage_info(img, center_pos, self.stage)
                 
-                self.visualizer.draw_wheelchair(img, marker_pos, heading_angle)
+                # 3-4. 융합된 최종 휠체어 (메인, 두껍게)
+                self.visualizer.draw_wheelchair(
+                    img,
+                    center_pos,
+                    heading_angle,
+                    body_color=(0, 255, 0),      # 초록색
+                    front_color=(0, 255, 255),   # 시안색
+                    thickness=3,
+                    label="Fused"
+                )
                 
-                # 4. [추가] 화면에 명령 지시 표시
+                # 3-5. 각도 정보 표시
+                self.visualizer.draw_angle_info(img, center_pos, heading_angle)
+                
+                # 3-6. 디버그 정보 패널
+                if self.show_debug:
+                    self.visualizer.draw_debug_info(img, per_cam_est, len(det_all))
+                
+                # 4. 주행 명령 표시
                 self.visualizer.draw_action_command(img, current_action)
             
             # 도움말
             self.visualizer.draw_help_text(img)
             
+            # 화면 표시
             cv2.imshow(self.win_name, img)
             cv2.imshow("Monitor", np.hstack([cv2.resize(mon1,(640,360)), 
                                              cv2.resize(mon0,(640,360))]))
             
+            # ===== 키 입력 처리 (토글 기능 추가) =====
             key = cv2.waitKey(30) & 0xFF
             if key == ord(' '):
                 play = not play
@@ -263,6 +349,15 @@ class CompactTracker:
             elif key == ord('c'):
                 self.dynamic_obstacles.clear()
                 self.update_path()
+            elif key == ord('d'):  # 'd' - 디버그 정보 토글
+                self.show_debug = not self.show_debug
+                print(f"🔧 디버그 정보: {'ON' if self.show_debug else 'OFF'}")
+            elif key == ord('e'):  # 'e' - 카메라 추정치 토글
+                self.show_camera_estimates = not self.show_camera_estimates
+                print(f"📷 카메라별 추정치: {'ON' if self.show_camera_estimates else 'OFF'}")
+            elif key == ord('r'):  # 'r' - 레이 표시 토글
+                self.show_rays = not self.show_rays
+                print(f"📡 레이 표시: {'ON' if self.show_rays else 'OFF'}")
         
         self.cap0.release()
         self.cap1.release()
