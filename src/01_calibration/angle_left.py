@@ -21,7 +21,7 @@ detector = cv2.aruco.ArucoDetector(aruco_dict, cv2.aruco.DetectorParameters())
 obj_points = np.array([[-0.125, 0.125, 0], [0.125, 0.125, 0], 
                        [0.125, -0.125, 0], [-0.125, -0.125, 0]], dtype=np.float32)
 
-cap = cv2.VideoCapture("90_l.mp4") # 혹은 동영상 파일 경로
+cap = cv2.VideoCapture("45_l.mp4") # 혹은 동영상 파일 경로
 
 while cap.isOpened():
     ret, frame = cap.read()
