@@ -57,8 +57,8 @@ class IntegratedWheelchairMapTracker:
         self.is_initialized = False
 
         # 영상
-        self.cap_rear = cv2.VideoCapture("rear.mp4")
-        self.cap_left = cv2.VideoCapture("left.mp4")
+        self.cap_rear = cv2.VideoCapture("test_rear.mp4")
+        self.cap_left = cv2.VideoCapture("test_left.mp4")
         self.total_frames = int(min(
             self.cap_rear.get(cv2.CAP_PROP_FRAME_COUNT),
             self.cap_left.get(cv2.CAP_PROP_FRAME_COUNT)
