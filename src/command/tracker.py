@@ -1,3 +1,4 @@
+
 import numpy as np
 import math
 
@@ -108,7 +109,7 @@ class PathTracker:
                                math.cos(target_yaw - current_yaw))
 
         # 2. 이번 프레임에서 내리고 싶은 '이상적인' 명령 판별
-        dead_zone = math.radians(15)
+        dead_zone = math.radians(25)
         if abs(yaw_error) < dead_zone:
             ideal_action = "FORWARD"
         elif yaw_error > 0:

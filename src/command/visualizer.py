@@ -1,10 +1,11 @@
+
 import cv2
 import numpy as np
 import math
 
 
 class Visualizer:
-    """맵 및 경로 시각화 모듈 (카메라별/융합 추정치 표시 지원)"""
+    """맵 및 경로 시각화 모듈"""
     
     def __init__(self, map_w, map_h, car_dim, car_pos, wc_w, wc_l, map_scale):
         self.map_w = map_w
@@ -36,20 +37,6 @@ class Visualizer:
             (35, 35, 45), 
             -1
         )
-        
-        # 주차 경계선 표시 (옵션)
-        ext_w, ext_h = 600, 720
-        car_center_x = self.car_x + self.car_dim[0] / 2
-        car_center_y = self.car_y + self.car_dim[1] / 2
-        
-        x1 = int(car_center_x - ext_w / 2)
-        y1 = int(car_center_y - ext_h / 2)
-        x2 = int(car_center_x + ext_w / 2)
-        y2 = int(car_center_y + ext_h / 2)
-        
-        cv2.rectangle(img, (x1, y1), (x2, y2), (60, 60, 60), 2)
-        cv2.putText(img, "Parking Area (600x720)", (x1, y1 - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 60, 60), 1)
     
     def draw_obstacles(self, img, obstacles):
         """동적 장애물 그리기"""
@@ -125,158 +112,41 @@ class Visualizer:
             0, 0.4, (255, 200, 100), 1
         )
     
-    def draw_angle_info(self, img, pos, heading_angle):
-        """각도 정보 표시 (북쪽 기준)"""
-        raw_deg = math.degrees(heading_angle) + 90.0
-        display_angle = raw_deg % 360.0
-        cv2.putText(
-            img,
-            f"Angle(N=0): {display_angle:.1f}deg",
-            (int(pos[0]) + 50, int(pos[1]) - 40),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1
-        )
-    
-    def draw_wheelchair(self, img, center_pos, heading_angle,
-                        body_color=(0, 255, 0), front_color=(0, 255, 255),
-                        thickness=2, label=None):
-        """
-        휠체어 그리기 (개선 버전)
+    def draw_wheelchair(self, img, marker_pos, heading_angle):
+        """휠체어 그리기"""
+        center = marker_pos + np.array([
+            (self.wc_l/2) * self.map_scale * math.cos(heading_angle), 
+            (self.wc_l/2) * self.map_scale * math.sin(heading_angle)
+        ])
         
-        Args:
-            img: 이미지
-            center_pos: 중심 위치 (numpy array)
-            heading_angle: 헤딩 각도 (라디안)
-            body_color: 테두리 색상
-            front_color: 앞면 강조 색상
-            thickness: 선 두께
-            label: 표시할 라벨 (예: "Fused", "Front", "Rear")
-        """
-        if center_pos is None:
-            return
-        
-        center = center_pos.astype(np.float32)
-        w_px = (self.wc_w * self.map_scale) / 2.0
-        l_px = (self.wc_l * self.map_scale) / 2.0
-        
-        # 회전 변환
-        base_pts = np.array([
-            [-l_px, -w_px], [l_px, -w_px], 
-            [l_px, w_px], [-l_px, w_px]
-        ], dtype=np.float32)
-        
-        rot_m = np.array([
+        w, l = (self.wc_w * self.map_scale) / 2, (self.wc_l * self.map_scale) / 2
+        rot = np.array([
             [math.cos(heading_angle), -math.sin(heading_angle)],
-            [math.sin(heading_angle),  math.cos(heading_angle)]
-        ], dtype=np.float32)
+            [math.sin(heading_angle), math.cos(heading_angle)]
+        ])
         
-        pts = (base_pts @ rot_m.T) + center
-        
-        # 휠체어 테두리
-        cv2.polylines(img, [pts.astype(np.int32)], True, body_color, thickness, cv2.LINE_AA)
-        
-        # 앞면 강조
-        cv2.line(img, tuple(pts[0].astype(int)), tuple(pts[3].astype(int)), 
-                 front_color, thickness + 1)
-        
-        # 방향 화살표
+        pts = np.dot([[-l, -w], [l, -w], [l, w], [-l, w]], rot.T) + center
+        cv2.polylines(img, [pts.astype(np.int32)], True, (0, 255, 0), 2)
+        cv2.line(img, tuple(pts[0].astype(int)), tuple(pts[3].astype(int)), (0, 0, 255), 3)
         cv2.arrowedLine(
-            img,
-            tuple(center.astype(int)),
-            (int(center[0] + 45 * math.cos(heading_angle)),
-             int(center[1] + 45 * math.sin(heading_angle))),
-            body_color, thickness
+            img, 
+            tuple(marker_pos.astype(int)), 
+            (int(marker_pos[0] + 45 * math.cos(heading_angle)), 
+             int(marker_pos[1] + 45 * math.sin(heading_angle))), 
+            (255, 255, 255), 
+            2
         )
-        
-        # 라벨 표시
-        if label is not None:
-            cv2.putText(img, label, 
-                       (int(center[0]) + 10, int(center[1]) + 15),
-                       0, 0.5, body_color, 2, cv2.LINE_AA)
-    
-    def draw_camera_estimates(self, img, per_cam_est, cams):
-        """
-        카메라별 추정치 그리기 (반투명 휠체어)
-        
-        Args:
-            img: 이미지
-            per_cam_est: {cam_name: (center_pos, heading, weight)} 딕셔너리
-            cams: 카메라 설정 딕셔너리
-        """
-        # 카메라별 색상 정의
-        cam_colors = {
-            'front': (255, 100, 100),  # 빨강
-            'rear': (100, 100, 255),   # 파랑
-            'left': (100, 255, 100),   # 초록
-            'right': (255, 255, 100),  # 노랑
-        }
-        
-        for cam_name, est in per_cam_est.items():
-            if est is None:
-                continue
-            
-            cam_pos, cam_heading, weight = est
-            color = cam_colors.get(cam_name, (150, 150, 150))
-            
-            # 가중치에 따라 투명도 조절 (알파 블렌딩 대신 얇은 선으로)
-            thickness = max(1, int(weight * 2))
-            
-            # 카메라별 휠체어 그리기
-            self.draw_wheelchair(
-                img, 
-                cam_pos, 
-                cam_heading,
-                body_color=color,
-                front_color=color,
-                thickness=thickness,
-                label=f"{cam_name[:1].upper()}"  # F, R, L, R 등
-            )
-    
-    def draw_rays_and_markers(self, img, detections, cams):
-        """
-        카메라에서 마커까지의 레이와 마커 위치 그리기
-        
-        Args:
-            img: 이미지
-            detections: detect_and_estimate에서 반환된 det_all 리스트
-            cams: 카메라 설정 딕셔너리
-        """
-        for d in detections:
-            cam = d["cam"]
-            if cam not in cams:
-                continue
-            
-            cfg = cams[cam]
-            
-            # 카메라 위치
-            cp = tuple(cfg['pos'].astype(int))
-            
-            # 마커 위치 (center_pos 대신 marker_pos가 있다면)
-            if "marker_pos" in d:
-                mp = tuple(d["marker_pos"].astype(int))
-            else:
-                mp = tuple(d["pos"].astype(int))
-            
-            # 색상 설정
-            col = cfg.get("color", (180, 180, 180))
-            
-            # 레이 그리기
-            cv2.line(img, cp, mp, col, 1, cv2.LINE_AA)
-            
-            # 마커 표시
-            cv2.circle(img, mp, 4, (255, 255, 0), -1)
-            cv2.putText(img, f"ID{d['marker_id']}", 
-                       (mp[0] + 6, mp[1] - 6),
-                       0, 0.45, (255, 255, 0), 1, cv2.LINE_AA)
     
     def draw_help_text(self, img):
         """도움말 텍스트 그리기"""
         cv2.putText(
             img, 
-            "L-Click: Add | R-Click: Remove | SPACE: Play/Pause | q: Quit | d: Debug", 
+            "L-Click: Add Obstacle | R-Click: Remove", 
             (10, 30), 
             0, 0.5, (200, 200, 200), 1
         )
 
+    # visualizer.py 내부에 추가
     def draw_action_command(self, img, action):
         """화면 좌측 하단에 주행 지시 표시"""
         cmd_map = {
@@ -296,40 +166,3 @@ class Visualizer:
         # 명령 텍스트 출력
         cv2.putText(img, text, (35, self.map_h - 42), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
-    
-    def draw_debug_info(self, img, per_cam_est, total_detections):
-        """
-        우측 상단에 디버그 정보 표시
-        
-        Args:
-            img: 이미지
-            per_cam_est: 카메라별 추정치
-            total_detections: 전체 검출 수
-        """
-        y_offset = 50
-        x_pos = self.map_w - 250
-        
-        # 배경 박스
-        cv2.rectangle(img, (x_pos - 10, 30), (self.map_w - 10, y_offset + len(per_cam_est) * 25 + 20), 
-                     (0, 0, 0), -1)
-        cv2.rectangle(img, (x_pos - 10, 30), (self.map_w - 10, y_offset + len(per_cam_est) * 25 + 20), 
-                     (100, 100, 100), 1)
-        
-        # 전체 검출 수
-        cv2.putText(img, f"Total Detections: {total_detections}", 
-                   (x_pos, y_offset), 0, 0.5, (255, 255, 255), 1)
-        
-        # 카메라별 정보
-        for i, (cam_name, est) in enumerate(per_cam_est.items()):
-            y = y_offset + (i + 1) * 25
-            
-            if est is None:
-                text = f"{cam_name}: N/A"
-                color = (100, 100, 100)
-            else:
-                _, cam_heading, weight = est
-                angle_deg = (math.degrees(cam_heading) + 90.0) % 360.0
-                text = f"{cam_name}: {angle_deg:.1f}deg (w:{weight:.2f})"
-                color = (100, 255, 100)
-            
-            cv2.putText(img, text, (x_pos, y), 0, 0.45, color, 1)
