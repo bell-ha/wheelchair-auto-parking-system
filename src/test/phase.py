@@ -11,11 +11,11 @@ class PhaseController:
         
         # === 단계별 목표 각도 설정 ===
         # Phase 1: -85 ~ -91도 (Left Cam 기준 정렬)
-        self.p1_min, self.p1_max = 89.5, 91.5 
+        self.p1_min, self.p1_max = 91.0, 92.0
         # Phase 3: 145 ~ 150도 (Back Cam 기준 회전)
         self.p3_min, self.p3_max = -50.0, -40.0
         # Phase 5: 90 ~ 95도 (Back Cam 기준 최종 정렬)
-        self.p5_min, self.p5_max = -91.0, -90.0
+        self.p5_min, self.p5_max = -95.0, -92.0
         
         # 고정 명령 상수 정의
         self.CMD_STOP = "STOP"
@@ -148,14 +148,25 @@ class PhaseController:
         elif not self.phase5_complete:
             action = self.CMD_LEFT # 혹은 CMD_RIGHT (상황에 따라)
             self.control_mode = "PHASE 5: FINAL ALIGN"
-        # PHASE 6: 최종 진입
+                # PHASE 6: 후진 정렬
         elif not self.phase6_complete:
-            if sonar_dist_cm <= self.sonar_threshold:
-                self.phase6_complete = True
-                action = self.CMD_STOP
-            else:
-                action = self.CMD_FORWARD
-            self.control_mode = "PHASE 6: ENTERING"
+            if rel_pos:
+                target_y = self.goal_pos[1]
+                current_y = rel_pos[1]
+                y_diff = abs(current_y - target_y)
+                
+                if y_diff <= self.goal_tolerance:
+                    self.goal_reached = True
+                    self.wait_counter = 30
+                    action = self.CMD_STOP
+                    print(f"🎯 PHASE 6 완료")
+                else:
+                    if current_y < target_y:
+                        action = self.CMD_BACKWARD # 오버런 시 후진
+                        self.control_mode = "PHASE 6: BACK"
+                    else:
+                        action = self.CMD_FORWARD # 언더런 시 전진
+                        self.control_mode = "PHASE 6: FORWARD"
         
         else:
             action = self.CMD_STOP

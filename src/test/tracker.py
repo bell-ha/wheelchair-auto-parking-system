@@ -184,7 +184,10 @@ class PathTracker:
 
         # 2. 이번 프레임에서 내리고 싶은 '이상적인' 명령 판별
         dead_zone = math.radians(15)
-        if abs(yaw_error) < dead_zone:
+        reverse_zone = math.radians(100)
+        if abs(yaw_error) > reverse_zone:
+            ideal_action = "BACKWARD"
+        elif abs(yaw_error) < dead_zone:
             ideal_action = "FORWARD"
         elif yaw_error > 0:
             ideal_action = "TURN LEFT"
@@ -210,6 +213,8 @@ class PathTracker:
             return 0.0, 0.15, "TURN LEFT"
         elif ideal_action == "TURN RIGHT":
             return 0.0, -0.15, "TURN RIGHT"
+        elif ideal_action == "BACKWARD":
+            return -0.2, 0.0, "BACKWARD"
         
         return 0.0, 0.0, "STOP"
     

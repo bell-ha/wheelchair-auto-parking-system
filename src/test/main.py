@@ -1,12 +1,65 @@
 import cv2
 import numpy as np
 import math
+import json
+import socket
+import time
 
 from planner import PathPlanner
 from tracker import PathTracker
 from localization import PoseEstimator
 from visualizer import Visualizer
 from phase import PhaseController
+
+# ===== 사용자 설정 (control.py 참고) =====
+SERVER_IP = "172.25.244.144"   # 리눅스 PC IP로 바꾸기
+SERVER_PORT = 25001
+
+SEND_HZ = 30                   # 20~50 추천
+# 속도 (원하면 여기만 조절)
+FWD_MM_S = 200
+REV_MM_S = -200
+YAW_MRAD_S = 300               # 0.300 rad/s
+# =======================
+
+
+class UdpCommandSender:
+    def __init__(self, server_ip, server_port, send_hz):
+        self.addr = (server_ip, server_port)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.dt = 1.0 / float(send_hz)
+        self.last_send = 0.0
+        self.last_cmd = (0, 0)
+
+    def _send_payload(self, payload):
+        self.sock.sendto(json.dumps(payload).encode("utf-8"), self.addr)
+
+    def send_stop(self, force=False):
+        if force:
+            self._send_payload({"stop": True})
+        self.send_cmd(0, 0)
+
+    def send_cmd(self, v_mm_s, w_mrad_s):
+        now = time.time()
+        if (now - self.last_send) < self.dt:
+            return
+        self._send_payload({"v": v_mm_s, "w": w_mrad_s})
+        self.last_cmd = (v_mm_s, w_mrad_s)
+        self.last_send = now
+
+    def send_action(self, action_cmd):
+        if action_cmd in ("STOP", "NO PATH", "STOP (TRANSITION)"):
+            self.send_cmd(0, 0)
+        elif action_cmd == "FORWARD":
+            self.send_cmd(FWD_MM_S, 0)
+        elif action_cmd == "BACKWARD":
+            self.send_cmd(REV_MM_S, 0)
+        elif action_cmd == "TURN LEFT":
+            self.send_cmd(0, YAW_MRAD_S)
+        elif action_cmd == "TURN RIGHT":
+            self.send_cmd(0, -YAW_MRAD_S)
+        else:
+            self.send_cmd(0, 0)
 
 
 # 카메라 캘리브레이션 파라미터
@@ -74,7 +127,7 @@ class CompactTracker:
         cv2.resizeWindow(self.win_name, 600, 600)        # 초기 창 크기를 600x600으로 설정
         
         # 시나리오 목표 위치 (픽셀 단위)
-        self.parking_goal = (car_cx, car_rear_y - 30)  # 최종 주차 위치
+        self.parking_goal = (car_cx, car_rear_y + 70)  # 최종 주차 위치
         
         # 동적 장애물
         self.dynamic_obstacles = []
@@ -108,6 +161,9 @@ class CompactTracker:
         
         self.visualizer = Visualizer(self.map_w, self.map_h, self.car_dim, 
                                      (self.car_x, self.car_y), self.wc_w, self.wc_l, self.map_scale)
+
+        # 명령 전송기
+        self.cmd_sender = UdpCommandSender(SERVER_IP, SERVER_PORT, SEND_HZ)
         
         # 영상
         self.cap0 = cv2.VideoCapture(0)
@@ -232,6 +288,12 @@ class CompactTracker:
             self.sonar_dist_cm
         )
     
+
+    def send(self, action_cmd):
+        """명령어 전송 (control.py 프로토콜 기반)"""
+        print(f"➡️ 명령어 전송: {action_cmd}")
+        self.cmd_sender.send_action(action_cmd)
+
     def run(self):
         """메인 루프"""
         play = True
@@ -297,7 +359,8 @@ class CompactTracker:
                     )
                     
                     # [추가] 실제 하드웨어나 서버로 명령을 발행해야 한다면 여기서 수행합니다.
-                    # self.publisher.send(current_action) 
+                    self.send(current_action) 
+
 
                     # 3. 시각화 호출 (전달받은 target_y 사용)
                     self.visualizer.draw_phase_guidance(
@@ -317,6 +380,7 @@ class CompactTracker:
                     linear_vel, angular_vel, current_action = self.tracker.compute_action(
                         center, heading_angle
                     )
+                    self.send(current_action)
                 
                 # 휠체어 및 경로 렌더링
                 path = self.tracker.get_path()
@@ -348,6 +412,7 @@ class CompactTracker:
             if key == ord(' '):
                 play = not play
             elif key == ord('q'):
+                self.cmd_sender.send_stop(force=True)
                 break
             elif key == ord('c'):
                 self.dynamic_obstacles.clear()
