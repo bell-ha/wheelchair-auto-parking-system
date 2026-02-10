@@ -144,7 +144,10 @@ class PhaseController:
                 else:
                     action = self.CMD_BACKWARD if current_x > 0 else self.CMD_FORWARD
                 self.control_mode = f"PHASE 4: X-ALIGN"
-
+        # PHASE 5: 최종 정밀 정렬
+        elif not self.phase5_complete:
+            action = self.CMD_LEFT # 혹은 CMD_RIGHT (상황에 따라)
+            self.control_mode = "PHASE 5: FINAL ALIGN"
         # PHASE 6: 최종 진입
         elif not self.phase6_complete:
             if sonar_dist_cm <= self.sonar_threshold:
