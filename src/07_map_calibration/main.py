@@ -8,7 +8,7 @@ import os
 from dataclasses import dataclass
 
 # =========================
-# Intrinsic (shared fisheye)
+# Intrinsic (shared fisheye) 카메라 내부 파라미터 및 왜곡계수
 # =========================
 K = np.array([[601.71923257, 0.0, 630.47700714],
               [0.0, 601.34529853, 367.21223657],
@@ -19,8 +19,8 @@ D = np.array([-0.18495647, 0.02541005, -0.01068433, 0.00321714], dtype=np.float3
 MARKER_SIZE_M = 0.25  # 25cm
 
 # =========================
-# ArUco
-# =========================
+# ArUco(25cm 마커) 검출 파라미터
+# =========================  
 aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_250)
 aruco_params = cv2.aruco.DetectorParameters()
 detector = cv2.aruco.ArucoDetector(aruco_dict, aruco_params)
@@ -33,23 +33,23 @@ OBJ_POINTS = np.array([
 ], dtype=np.float32)
 
 
-def wrap360(deg: float) -> float:
+def wrap360(deg: float) -> float: # 0~360도 범위로 변환
     deg = deg % 360.0
     return deg + 360.0 if deg < 0 else deg
 
 
-def wrap_pi(rad: float) -> float:
+def wrap_pi(rad: float) -> float: # -π~+π 범위로 변환 smoothing용
     return (rad + math.pi) % (2 * math.pi) - math.pi
 
 
-def compass_deg_to_map_rad(compass_deg: float) -> float:
+def compass_deg_to_map_rad(compass_deg: float) -> float: 
     # compass: 0=N,90=E -> map: 0=+x, 90=+y(아래)
     mdeg = (compass_deg + 270.0) % 360.0
     return math.radians(mdeg)
 
 
 @dataclass
-class CamCfg:
+class CamCfg: # 카메라 설정(key, 번호, 픽셀좌표, 높이, 방향, 민감도, 거리 배율, 보정 등)
     key: str
     index: int
     pos_px: np.ndarray
@@ -69,24 +69,24 @@ class WheelchairTracker:
         # =========================
         self.map_w, self.map_h = 1000, 1000
         self.grid_w, self.grid_h = 600, 720
-        self.map_scale = 0.5
+        self.map_scale = 0.5 # 1 pixel = 2 cm -> 변환 필요
         self.off_x, self.off_y = 200, 150
 
         self.car_zone = ((200 + self.off_x, 180 + self.off_y),
                          (400 + self.off_x, 540 + self.off_y))
 
         # wheelchair size (cm)
-        self.wc_w_cm, self.wc_l_cm = 55.0, 66.0
+        self.wc_w_cm, self.wc_l_cm = 55.0, 66.0 
 
         # marker height (cm)
-        self.marker_h_cm_by_id = {0: 70.0, 1: 70.0}
-        self.marker_h_cm_default = 70.0
+        self.marker_h_cm_by_id = {0: 70.0, 1: 70.0} #휠체어 마커 위치
+        self.marker_h_cm_default = 70.0 
 
         # marker->center offset (cm)
         self.center_offset_cm_by_id = {0: 23.0, 1: 23.0}
 
         # smoothing
-        self.alpha = 0.30
+        self.alpha = 0.30 # 측정치와 이전 상태를 섞음
 
         # quality-based weight params
         self.reproj_good_px = 2.0
@@ -425,7 +425,7 @@ class WheelchairTracker:
             return
 
     # -------------------------
-    # Detection / estimation
+    # Detection / estimation 마커를 프레임에서 추정
     # -------------------------
     def estimate_from_frame(self, frame, cam: CamCfg):
         dets = []
@@ -436,21 +436,21 @@ class WheelchairTracker:
 
         for i, mid_arr in enumerate(ids):
             mid = int(mid_arr[0])
-            if mid not in (0, 1):
+            if mid not in (0, 1): # 휠체어 마커는 0,1만
                 continue
 
             c2 = corners[i].reshape(4, 2).astype(np.float32)
-            und = cv2.fisheye.undistortPoints(corners[i].reshape(-1, 1, 2), K, D, P=K)
+            und = cv2.fisheye.undistortPoints(corners[i].reshape(-1, 1, 2), K, D, P=K) # 왜곡 보정
 
-            ok, rvec, tvec = cv2.solvePnP(OBJ_POINTS, und, K, None, flags=cv2.SOLVEPNP_ITERATIVE)
+            ok, rvec, tvec = cv2.solvePnP(OBJ_POINTS, und, K, None, flags=cv2.SOLVEPNP_ITERATIVE) # PnP로 3D 위치 추정
             if not ok:
                 continue
 
             tvec = tvec.reshape(3).astype(np.float32)
-            dist_m = float(np.linalg.norm(tvec))
+            dist_m = float(np.linalg.norm(tvec)) # 지면 거리 계산
 
             mh = float(self.marker_h_cm_by_id.get(mid, self.marker_h_cm_default))
-            dh_m = abs(cam.h_cm - mh) / 100.0
+            dh_m = abs(cam.h_cm - mh) / 100.0 # 카메라와 마커 높이 차이(m)
             ground_m = math.sqrt(max(0.0, dist_m * dist_m - dh_m * dh_m))
             ground_cm = ground_m * 100.0 * cam.dist_gain
 
@@ -463,6 +463,7 @@ class WheelchairTracker:
                 ground_cm * self.map_scale * math.sin(ray_rad)
             ], dtype=np.float32)
 
+            # Yaw 계산
             rmat, _ = cv2.Rodrigues(rvec)
             sy = math.sqrt(rmat[0, 0] ** 2 + rmat[1, 0] ** 2)
             raw_yaw_deg = math.degrees(math.atan2(-rmat[2, 0], sy))
@@ -487,10 +488,13 @@ class WheelchairTracker:
 
             s_area = self.smooth01(area, self.area_good_px2, self.area_bad_px2)
             s_err = self.smooth01(reproj_err, self.reproj_good_px, self.reproj_bad_px)
+            # 품질 계산(마커가 차지하는 면적(area), solvePnP로 얻은 것을 다시 2D로 투영한 것과 실제 검출된 코너의 차이(reproj_err), 카메라-마커 간 거리(ground_m))
             quality = max(self.min_quality_w, (0.45 * s_err + 0.45 * s_area + 0.10 * z_score))
 
             cx = float(np.mean(c2[:, 0]))
             rel_x = (cx - frame.shape[1] / 2) / (frame.shape[1] / 2)
+
+            # 최종 가중치 계산
             w_center = max(0.1, 1.0 - abs(rel_x))
             w_dist = 1.0 / (1.0 + ground_m)
             w_base = float(max(0.05, w_center * w_dist))
@@ -528,7 +532,7 @@ class WheelchairTracker:
         return center, heading
 
     # -------------------------
-    # Drawing
+    # Drawing(라인등 그리기 파트)
     # -------------------------
     def draw_static_map(self, img):
         step = int(20 * self.map_scale * 2)
