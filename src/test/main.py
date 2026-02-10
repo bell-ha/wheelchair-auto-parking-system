@@ -23,21 +23,49 @@ class CompactTracker:
         self.map_w, self.map_h = 1000, 1000
         self.grid_w, self.grid_h = 600, 720
         self.off_x, self.off_y = 200, 150
-        self.map_scale = 0.5
-        self.wc_w, self.wc_l = 57.0, 100.0
+        self.map_scale = 1.0
+        self.wc_w, self.wc_l = 55.0, 66.0
         
-        # 마커 및 카메라
-        self.marker_size, self.marker_h = 25.0, 72.0
-        car_cx, car_cy = self.off_x + self.grid_w/2, self.off_y + self.grid_h/2
+        # 마커 및 카메라 (07_map_calibration 값 반영)
+        self.marker_size_m, self.marker_h_cm = 0.25, 70.0
+        self.car_zone = ((200 + self.off_x, 180 + self.off_y),
+                         (400 + self.off_x, 540 + self.off_y))
+
+        car_cx = (self.car_zone[0][0] + self.car_zone[1][0]) / 2
+        car_cy = (self.car_zone[0][1] + self.car_zone[1][1]) / 2
+
         self.cams = {
-            'cam1': {'pos': np.array([car_cx-140, car_cy-135]), 'h': 110, 'focal': 950, 'map_angle': 157, 'yaw': 1, 'fov': 45, 'color': (255,120,100), 'map_scale': self.map_scale},
-            'cam0': {'pos': np.array([car_cx+1.4, car_cy+170]), 'h': 105, 'focal': 950, 'map_angle': 90, 'yaw': 1, 'fov': 45, 'color': (100,120,255), 'map_scale': self.map_scale}
+            "cam0": {
+                "pos_px": np.array([301.4 + self.off_x, 540.0 + self.off_y], dtype=np.float32),
+                "h_cm": 105.5,
+                "map_angle_deg": 90.0,
+                "sens": 1.6,
+                "install_angle": 0.0,
+                "install_offset": 0.0,
+                "yaw_trim_deg": 3.0,
+                "dist_gain": 0.90,
+                "map_scale": self.map_scale,
+                "color": (100, 120, 255)
+            },
+            "cam1": {
+                "pos_px": np.array([200.0 + self.off_x, 270.0 + self.off_y], dtype=np.float32),
+                "h_cm": 110.0,
+                "map_angle_deg": 157.0,
+                "sens": 1.6,
+                "install_angle": 113.0,
+                "install_offset": 50.84,
+                "yaw_trim_deg": 8.0,
+                "dist_gain": 0.90,
+                "map_scale": self.map_scale,
+                "color": (255, 120, 100)
+            }
         }
-        self.dist_gain, self.angle_gain, self.alpha = 2.0, 1.56, 0.75
+        self.dist_gain, self.angle_gain, self.alpha = 0.90, 1.56, 0.30
         
         # 차량
-        self.car_dim = [200, 360]
-        self.car_x, self.car_y = car_cx - self.car_dim[0]/2, car_cy - self.car_dim[1]/1.6
+        self.car_dim = [self.car_zone[1][0] - self.car_zone[0][0],
+                self.car_zone[1][1] - self.car_zone[0][1]]
+        self.car_x, self.car_y = self.car_zone[0]
         car_rear_y = self.car_y + self.car_dim[1] + 150
 
         # CompactTracker.__init__ 내부
@@ -73,15 +101,17 @@ class CompactTracker:
         self.tracker.set_obstacle_checker(self.is_obstacle)
         self.tracker.set_phase_controller(self.phase_controller)  # Phase Controller 연결
         
-        self.estimator = PoseEstimator(K, D, self.cams, self.marker_size, self.marker_h, 
-                                       self.dist_gain, self.alpha)
+        self.estimator = PoseEstimator(
+            K, D, self.cams, self.marker_size_m, self.marker_h_cm,
+            self.dist_gain, self.alpha
+        )
         
         self.visualizer = Visualizer(self.map_w, self.map_h, self.car_dim, 
                                      (self.car_x, self.car_y), self.wc_w, self.wc_l, self.map_scale)
         
         # 영상
-        self.cap0 = cv2.VideoCapture('rear_1.mp4')
-        self.cap1 = cv2.VideoCapture('left_1.mp4')
+        self.cap0 = cv2.VideoCapture(0)
+        self.cap1 = cv2.VideoCapture(1)
         self.total_frames = int(min(self.cap0.get(cv2.CAP_PROP_FRAME_COUNT), 
                                    self.cap1.get(cv2.CAP_PROP_FRAME_COUNT)))
         
@@ -196,15 +226,15 @@ class CompactTracker:
         
         # PathTracker의 update_path 호출
         self.tracker.update_path(
-            self.estimator.marker_pos, 
-            self.estimator.heading_angle, 
+            self.estimator.marker_pos,
+            self.estimator.heading_angle,
             self.parking_goal,
             self.sonar_dist_cm
         )
     
     def run(self):
         """메인 루프"""
-        play = False
+        play = True
         detected_marker_id = None
         detected_cam_side = None
         
@@ -272,7 +302,7 @@ class CompactTracker:
                     # 3. 시각화 호출 (전달받은 target_y 사용)
                     self.visualizer.draw_phase_guidance(
                         img, 
-                        marker_pos, 
+                        marker_pos,
                         heading_angle, 
                         self.phase_controller.get_current_phase(),
                         self.phase_controller, 
@@ -291,9 +321,9 @@ class CompactTracker:
                 # 휠체어 및 경로 렌더링
                 path = self.tracker.get_path()
                 if not self.tracker.use_phase_mode and len(path) >= 2:
-                    self.visualizer.draw_path(img, path, marker_pos, heading_angle)
-                
-                self.visualizer.draw_wheelchair(img, marker_pos, heading_angle)
+                    self.visualizer.draw_path(img, path, center, heading_angle)
+
+                self.visualizer.draw_wheelchair(img, center, heading_angle)
                 self.visualizer.draw_action_command(img, current_action)
             
             # 도움말

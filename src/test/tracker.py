@@ -73,21 +73,16 @@ class PathTracker:
         
         return False
     
-    def update_path(self, marker_pos, heading_angle, goal_pos, sonar_dist_cm=999.0):
+    def update_path(self, center, heading_angle, goal_pos, sonar_dist_cm=999.0):
         """
         경로 업데이트 및 재계획
         
         Args:
-            marker_pos: 마커 위치 [x, y]
+            center: 휠체어 중심 위치 [x, y]
             heading_angle: 현재 방향각 (라디안)
             goal_pos: 목표 위치 [x, y]
             sonar_dist_cm: 초음파 거리 (cm)
         """
-        center = marker_pos + np.array([
-            (self.wc_l/2) * self.map_scale * math.cos(heading_angle), 
-            (self.wc_l/2) * self.map_scale * math.sin(heading_angle)
-        ])
-        
         # === Phase 모드 (수동 전환 방식) ===
         if self.use_phase_mode:
             # Phase Controller가 있으면 사용

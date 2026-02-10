@@ -65,7 +65,7 @@ class Visualizer:
             col = (255, 100, 0) if i == exit_choice else (80, 80, 80)
             cv2.circle(img, gp, 8, col, -1 if i == exit_choice else 2)
     
-    def draw_path(self, img, path, marker_pos, heading_angle):
+    def draw_path(self, img, path, center, heading_angle):
         """경로 및 회전 정보 그리기"""
         if len(path) < 2:
             return
@@ -73,7 +73,7 @@ class Visualizer:
         cv2.polylines(img, [np.array(path, np.int32)], False, (0, 255, 255), 2)
         
         # 각도 정보
-        pivot = marker_pos
+        pivot = center
         target = path[-1]
         dx, dy = target[0] - pivot[0], target[1] - pivot[1]
         target_yaw = math.atan2(dy, dx)
@@ -111,13 +111,8 @@ class Visualizer:
             0, 0.4, (255, 200, 100), 1
         )
     
-    def draw_wheelchair(self, img, marker_pos, heading_angle):
+    def draw_wheelchair(self, img, center, heading_angle):
         """휠체어 그리기"""
-        center = marker_pos + np.array([
-            (self.wc_l/2) * self.map_scale * math.cos(heading_angle), 
-            (self.wc_l/2) * self.map_scale * math.sin(heading_angle)
-        ])
-        
         w, l = (self.wc_w * self.map_scale) / 2, (self.wc_l * self.map_scale) / 2
         rot = np.array([
             [math.cos(heading_angle), -math.sin(heading_angle)],
@@ -128,11 +123,11 @@ class Visualizer:
         cv2.polylines(img, [pts.astype(np.int32)], True, (0, 255, 0), 2)
         cv2.line(img, tuple(pts[0].astype(int)), tuple(pts[3].astype(int)), (0, 0, 255), 3)
         cv2.arrowedLine(
-            img, 
-            tuple(marker_pos.astype(int)), 
-            (int(marker_pos[0] + 45 * math.cos(heading_angle)), 
-             int(marker_pos[1] + 45 * math.sin(heading_angle))), 
-            (255, 255, 255), 
+            img,
+            tuple(center.astype(int)),
+            (int(center[0] + 45 * math.cos(heading_angle)),
+             int(center[1] + 45 * math.sin(heading_angle))),
+            (255, 255, 255),
             2
         )
     
