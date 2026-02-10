@@ -139,7 +139,7 @@ class CompactTracker:
         # 픽셀 좌표를 미터로 변환 (ROS2 코드와 매칭)
           # Phase 2 목표 Y 위치
         # 현재: 픽셀 직접 사용
-        target_y_offset = 200  # 차량 후방으로부터 200픽셀
+        target_y_offset = 300  # 차량 후방으로부터 250픽셀
         self.target_y = self.car_y + self.car_dim[1] + target_y_offset
         goal_pos_meters = [0.0, self.target_y]
         

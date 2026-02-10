@@ -25,7 +25,7 @@ class PhaseController:
         self.CMD_RIGHT = "TURN RIGHT"
         # 현재 (픽셀 통일)
         self.goal_tolerance = 5.0      # 픽셀
-        self.x_align_tolerance = 5.0   # 픽셀
+        self.x_align_tolerance = 1.0   # 픽셀
         self.sonar_threshold = 40.0     # 픽셀
         # 상태 플래그
         self.alignment_complete = False
