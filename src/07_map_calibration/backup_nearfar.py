@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# wc_tracker_kalman_pos_circmean_yaw_px1cm.py
+# wc_tracker_with_click_calib_accum_errweight_px1cm_distbin_full.py
 
 import cv2
 import numpy as np
@@ -8,7 +8,6 @@ import time
 import json
 import os
 from dataclasses import dataclass
-from collections import deque
 
 # =========================
 # Intrinsic (shared fisheye)
@@ -51,21 +50,6 @@ def compass_deg_to_map_rad(compass_deg: float) -> float:
     return math.radians(mdeg)
 
 
-def clamp(x, lo, hi):
-    return max(lo, min(hi, x))
-
-
-def circular_mean(rad_list):
-    if not rad_list:
-        return None
-    s = 0.0
-    c = 0.0
-    for a in rad_list:
-        s += math.sin(a)
-        c += math.cos(a)
-    return math.atan2(s, c)
-
-
 @dataclass
 class CamCfg:
     key: str
@@ -80,86 +64,12 @@ class CamCfg:
     dist_gain: float = 1.0
 
 
-class Kalman2D:
-    """
-    4-state constant-velocity KF:
-      x = [px, py, vx, vy]
-      z = [px, py]
-    """
-    def __init__(self):
-        self.x = np.zeros((4, 1), dtype=np.float32)
-        self.P = np.eye(4, dtype=np.float32) * 1000.0
-        self.initialized = False
-
-    def reset(self):
-        self.x[:] = 0.0
-        self.P[:] = np.eye(4, dtype=np.float32) * 1000.0
-        self.initialized = False
-
-    def init(self, px, py):
-        self.x = np.array([[px], [py], [0.0], [0.0]], dtype=np.float32)
-        self.P = np.eye(4, dtype=np.float32) * 200.0
-        self.initialized = True
-
-    def predict(self, dt: float, q_acc: float):
-        if not self.initialized:
-            return
-
-        F = np.array([
-            [1, 0, dt, 0],
-            [0, 1, 0, dt],
-            [0, 0, 1,  0],
-            [0, 0, 0,  1],
-        ], dtype=np.float32)
-
-        # Simple accel-noise Q (discrete white noise accel model-ish)
-        dt2 = dt * dt
-        dt3 = dt2 * dt
-        dt4 = dt2 * dt2
-        q = float(max(1e-6, q_acc))
-
-        Q = np.array([
-            [dt4/4, 0,      dt3/2, 0     ],
-            [0,     dt4/4,  0,     dt3/2 ],
-            [dt3/2, 0,      dt2,   0     ],
-            [0,     dt3/2,  0,     dt2   ],
-        ], dtype=np.float32) * q
-
-        self.x = F @ self.x
-        self.P = F @ self.P @ F.T + Q
-
-    def update(self, z_px: float, z_py: float, r_pos: float):
-        if not self.initialized:
-            self.init(z_px, z_py)
-            return
-
-        H = np.array([
-            [1, 0, 0, 0],
-            [0, 1, 0, 0],
-        ], dtype=np.float32)
-
-        R = np.eye(2, dtype=np.float32) * float(max(1e-6, r_pos))
-
-        z = np.array([[z_px], [z_py]], dtype=np.float32)
-        y = z - (H @ self.x)
-        S = H @ self.P @ H.T + R
-        Kk = self.P @ H.T @ np.linalg.inv(S)
-
-        self.x = self.x + (Kk @ y)
-        I = np.eye(4, dtype=np.float32)
-        self.P = (I - Kk @ H) @ self.P
-
-    @property
-    def pos(self):
-        return np.array([float(self.x[0, 0]), float(self.x[1, 0])], dtype=np.float32)
-
-
 class WheelchairTracker:
     def __init__(self):
         # =========================
         # Map params
         # =========================
-        self.map_w, self.map_h = 1000, 1000
+        self.map_w, self.map_h = 1500, 1500
         self.grid_w, self.grid_h = 600, 720
 
         # ✅ 1px = 1cm
@@ -167,6 +77,7 @@ class WheelchairTracker:
 
         self.off_x, self.off_y = 200, 150
 
+        # car zone (그대로 유지)
         self.car_zone = ((200 + self.off_x, 180 + self.off_y),
                          (400 + self.off_x, 540 + self.off_y))
 
@@ -178,9 +89,12 @@ class WheelchairTracker:
         self.marker_h_cm_default = 70.0
 
         # marker->center offset (cm)
-        self.center_offset_cm_by_id = {0: 23.0, 1: 23.0}
+        self.center_offset_cm_by_id = {0: 0.0, 1: 23.0} # 앞은 중앙에, 뒤는 23cm 뒤에
 
-        # quality-based weight params (측정 가중치용, 유지)
+        # smoothing
+        self.alpha = 0.30
+
+        # quality-based weight params
         self.reproj_good_px = 2.0
         self.reproj_bad_px = 8.0
         self.area_good_px2 = 2500.0
@@ -188,17 +102,35 @@ class WheelchairTracker:
         self.min_quality_w = 0.08
 
         # =========================
-        # Calibration (click)
+        # Click sample err-based weight
         # =========================
-        self.calib_path = "wc_calibration.json"
-        self.samples = []
-        self.calib_dxdy = np.array([0.0, 0.0], dtype=np.float32)
-        self.calib_yaw_offset = 0.0
-        self._load_calibration()
+        self.center_sigma_px = 60.0
+        self.yaw_sigma_deg = 20.0
+        self.min_click_w = 0.02
+        self.last_click_info = None
+
+        # =========================
+        # NEW: 거리 구간별 center calibration
+        # =========================
+        # m 단위: near(0~3), mid(3~6), far(6~)
+        self.dist_bins_m = [0.0, 3.0, 6.0, 999.0]
+        self.dist_blend_m = 0.5  # 경계 부드럽게 보간할 폭
+
+        self.calib_dxdy_bins = {
+            "near": np.array([0.0, 0.0], dtype=np.float32),
+            "mid":  np.array([0.0, 0.0], dtype=np.float32),
+            "far":  np.array([0.0, 0.0], dtype=np.float32),
+        }
+
+        # 최신 거리/최고 det (HUD/보정 적용 기준)
+        self.last_best_ground_m = None
+        self.last_best_det = None
+        self.last_best_quality = None
 
         # =========================
         # Camera configs
         # =========================
+        # ✅ dist_gain은 네가 원한 값 0.9로 고정(트랙바로 조절도 가능)
         self.cams = {
             "rear": CamCfg(
                 key="rear", index=0,
@@ -225,6 +157,18 @@ class WheelchairTracker:
         }
 
         # =========================
+        # Calibration storage
+        # =========================
+        self.calib_path = "wc_calibration.json"
+        self.samples = []
+
+        # 구버전 호환용(남겨둠)
+        self.calib_dxdy = np.array([0.0, 0.0], dtype=np.float32)  # pixels
+        self.calib_yaw_offset = 0.0  # radians
+
+        self._load_calibration()
+
+        # =========================
         # Camera open
         # =========================
         self.cap_rear = cv2.VideoCapture(self.cams["rear"].index)
@@ -232,25 +176,10 @@ class WheelchairTracker:
         if not self.cap_rear.isOpened() or not self.cap_left.isOpened():
             raise RuntimeError("카메라 오픈 실패: 인덱스(0/1) 확인")
 
-        # =========================
-        # Filters
-        # =========================
-        self.kf = Kalman2D()
-        self.yaw_state = 0.0
-        self.yaw_buf = deque(maxlen=20)
-
+        # fused (raw)
+        self.raw_center = None
+        self.raw_heading = 0.0
         self.is_initialized = False
-        self.last_t = time.time()
-
-        # debug / HUD
-        self.last_best_det = None
-        self.last_best_ground_m = None
-        self.last_best_quality = None
-        self.last_meas = None  # (center, heading)
-
-        # click mode
-        self.click_mode = None  # None | set_center | set_yaw_center | set_yaw_dir
-        self.tmp_yaw_center = None
 
         # =========================
         # UI
@@ -259,28 +188,25 @@ class WheelchairTracker:
         self.win_mon = "monitor(rear|left)"
         cv2.namedWindow(self.win_map, cv2.WINDOW_NORMAL)
         cv2.namedWindow(self.win_mon, cv2.WINDOW_NORMAL)
+
+        # ✅ 반드시 존재하도록 보장(너가 겪은 AttributeError 방지)
+        self.click_mode = None  # None | set_center | set_yaw_center | set_yaw_dir
+        self.tmp_yaw_center = None
+
         cv2.setMouseCallback(self.win_map, self._on_mouse)
 
-        # ---- 최소 트랙바들 ----
-        cv2.createTrackbar("Resp(0-100)", self.win_map, 55, 100, lambda v: None)      # 높을수록 빠릿
-        cv2.createTrackbar("RearGain(x100)", self.win_map, int(self.cams["rear"].dist_gain * 100), 500, lambda v: None)
-        cv2.createTrackbar("LeftGain(x100)", self.win_map, int(self.cams["left"].dist_gain * 100), 500, lambda v: None)
-
-        cv2.createTrackbar("GatePos(px)", self.win_map, 220, 800, lambda v: None)    # 측정 튐 컷
-        cv2.createTrackbar("GateYaw(deg)", self.win_map, 55, 180, lambda v: None)    # yaw 튐 컷
-
-        cv2.createTrackbar("Far(cm)", self.win_map, 250, 800, lambda v: None)        # 이 이상은 “멀다”
-        cv2.createTrackbar("ClipYaw(deg)", self.win_map, 20, 90, lambda v: None)     # 멀 때 프레임당 yaw 변화 제한
-        cv2.createTrackbar("JumpYaw(deg)", self.win_map, 45, 180, lambda v: None)    # 이 이상 차이면 급회전/재획득으로 보고 즉시 점프
-
-        cv2.createTrackbar("YawBufN", self.win_map, 20, 60, lambda v: None)
+        cv2.createTrackbar("Smooth(0-100)", self.win_map, int(self.alpha * 100), 100, lambda v: None)
+        cv2.createTrackbar("Rear_DistGain(x100)", self.win_map, int(self.cams["rear"].dist_gain * 100), 500, lambda v: None)
+        cv2.createTrackbar("Left_DistGain(x100)", self.win_map, int(self.cams["left"].dist_gain * 100), 500, lambda v: None)
+        cv2.createTrackbar("CenterSigma(px)", self.win_map, int(self.center_sigma_px), 300, lambda v: None)
+        cv2.createTrackbar("YawSigma(deg)", self.win_map, int(self.yaw_sigma_deg), 90, lambda v: None)
 
         print("[Keys]")
         print("  q/ESC : quit")
-        print("  r     : reset filter state")
-        print("  c     : center calibration (click 1 point)")
+        print("  r     : reset fuse (raw state reset)")
+        print("  c     : center calibration (click 1 point)  [거리 구간별 저장]")
         print("  a     : yaw calibration (click center then direction)")
-        print("  s     : save calibration (recompute weighted mean + write file)")
+        print("  s     : save (recompute weighted mean + write file)")
 
     # -------------------------
     # Calibration file I/O
@@ -291,49 +217,69 @@ class WheelchairTracker:
         try:
             with open(self.calib_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+
             self.samples = data.get("samples", []) or []
+
+            # 구버전 필드
             dx = float(data.get("calib_dx", 0.0))
             dy = float(data.get("calib_dy", 0.0))
             yo = float(data.get("calib_yaw_offset", 0.0))
             self.calib_dxdy = np.array([dx, dy], dtype=np.float32)
             self.calib_yaw_offset = yo
-            print(f"[LOAD] {self.calib_path} samples={len(self.samples)} dxdy=({dx:.2f},{dy:.2f}) yaw_off={math.degrees(yo):.1f}deg")
+
+            # 신버전 필드(있으면 읽기)
+            bins = data.get("calib_dxdy_bins", None)
+            if isinstance(bins, dict):
+                for k in ("near", "mid", "far"):
+                    if k in bins and isinstance(bins[k], (list, tuple)) and len(bins[k]) == 2:
+                        self.calib_dxdy_bins[k] = np.array([float(bins[k][0]), float(bins[k][1])], dtype=np.float32)
+
+            # 저장된 dist bin 경계도 있으면 읽기
+            db = data.get("dist_bins_m", None)
+            if isinstance(db, list) and len(db) >= 4:
+                self.dist_bins_m = [float(db[0]), float(db[1]), float(db[2]), float(db[3])]
+
+            print(f"[LOAD] {self.calib_path} samples={len(self.samples)} yaw_off={math.degrees(self.calib_yaw_offset):.1f}deg")
+            print(f"       calib_dxdy_bins near={self.calib_dxdy_bins['near']} mid={self.calib_dxdy_bins['mid']} far={self.calib_dxdy_bins['far']}")
         except Exception as e:
             print("[WARN] calibration load failed:", e)
 
     def _save_calibration(self):
         data = {
             "saved_at": time.time(),
+            "calib_yaw_offset": float(self.calib_yaw_offset),
+
+            # 구버전 호환용
             "calib_dx": float(self.calib_dxdy[0]),
             "calib_dy": float(self.calib_dxdy[1]),
-            "calib_yaw_offset": float(self.calib_yaw_offset),
+
+            # 신버전: 거리별 dxdy
+            "calib_dxdy_bins": {
+                "near": [float(self.calib_dxdy_bins["near"][0]), float(self.calib_dxdy_bins["near"][1])],
+                "mid":  [float(self.calib_dxdy_bins["mid"][0]),  float(self.calib_dxdy_bins["mid"][1])],
+                "far":  [float(self.calib_dxdy_bins["far"][0]),  float(self.calib_dxdy_bins["far"][1])],
+            },
+            "dist_bins_m": self.dist_bins_m,
             "samples": self.samples,
         }
         with open(self.calib_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        print(f"[SAVE] {self.calib_path} samples={len(self.samples)} dxdy=({self.calib_dxdy[0]:.2f},{self.calib_dxdy[1]:.2f}) yaw_off={math.degrees(self.calib_yaw_offset):.1f}deg")
+
+        print(f"[SAVE] {self.calib_path} samples={len(self.samples)} yaw_off={math.degrees(self.calib_yaw_offset):.1f}deg")
+        print(f"       bins near={self.calib_dxdy_bins['near']} mid={self.calib_dxdy_bins['mid']} far={self.calib_dxdy_bins['far']}")
 
     # -------------------------
     # Trackbars
     # -------------------------
     def update_from_trackbars(self):
-        resp = cv2.getTrackbarPos("Resp(0-100)", self.win_map) / 100.0
-        self.resp = float(max(0.01, resp))
+        self.alpha = max(0.01, cv2.getTrackbarPos("Smooth(0-100)", self.win_map) / 100.0)
+        rdg = cv2.getTrackbarPos("Rear_DistGain(x100)", self.win_map) / 100.0
+        ldg = cv2.getTrackbarPos("Left_DistGain(x100)", self.win_map) / 100.0
+        self.cams["rear"].dist_gain = max(0.01, rdg)
+        self.cams["left"].dist_gain = max(0.01, ldg)
 
-        self.cams["rear"].dist_gain = max(0.01, cv2.getTrackbarPos("RearGain(x100)", self.win_map) / 100.0)
-        self.cams["left"].dist_gain = max(0.01, cv2.getTrackbarPos("LeftGain(x100)", self.win_map) / 100.0)
-
-        self.gate_pos_px = float(max(5, cv2.getTrackbarPos("GatePos(px)", self.win_map)))
-        self.gate_yaw_deg = float(max(1, cv2.getTrackbarPos("GateYaw(deg)", self.win_map)))
-
-        self.far_cm = float(max(1, cv2.getTrackbarPos("Far(cm)", self.win_map)))
-        self.clip_yaw_deg = float(max(1, cv2.getTrackbarPos("ClipYaw(deg)", self.win_map)))
-        self.jump_yaw_deg = float(max(1, cv2.getTrackbarPos("JumpYaw(deg)", self.win_map)))
-
-        yawN = int(max(1, cv2.getTrackbarPos("YawBufN", self.win_map)))
-        if self.yaw_buf.maxlen != yawN:
-            old = list(self.yaw_buf)
-            self.yaw_buf = deque(old[-yawN:], maxlen=yawN)
+        self.center_sigma_px = max(5.0, float(cv2.getTrackbarPos("CenterSigma(px)", self.win_map)))
+        self.yaw_sigma_deg = max(1.0, float(cv2.getTrackbarPos("YawSigma(deg)", self.win_map)))
 
     # -------------------------
     # Helpers
@@ -357,23 +303,80 @@ class WheelchairTracker:
         t = (x - x0) / (x1 - x0)
         return float(1.0 - t)
 
+    def _click_quality_weight(self):
+        if self.last_best_quality is None:
+            return 1.0
+        return float(max(0.05, min(1.0, self.last_best_quality)))
+
+    def _err_weight_center(self, err_px: float) -> float:
+        sigma = float(self.center_sigma_px)
+        w = math.exp(-(err_px * err_px) / (2.0 * sigma * sigma))
+        return float(max(self.min_click_w, min(1.0, w)))
+
+    def _err_weight_yaw(self, err_rad: float) -> float:
+        sigma = math.radians(float(self.yaw_sigma_deg))
+        w = math.exp(-(err_rad * err_rad) / (2.0 * sigma * sigma))
+        return float(max(self.min_click_w, min(1.0, w)))
+
+    def _bin_name_for_dist(self, r_m: float) -> str:
+        if r_m < self.dist_bins_m[1]:
+            return "near"
+        if r_m < self.dist_bins_m[2]:
+            return "mid"
+        return "far"
+
+    def _dxdy_for_dist(self, r_m: float) -> np.ndarray:
+        """
+        현재 거리 r_m에 따라 dxdy를 선택.
+        - bin 값 사용
+        - bin 경계 근처에서는 선형 보간(부드럽게)
+        """
+        near_end = float(self.dist_bins_m[1])
+        mid_end = float(self.dist_bins_m[2])
+        b = float(self.dist_blend_m)
+
+        if r_m < near_end - b:
+            return self.calib_dxdy_bins["near"]
+        if r_m > mid_end + b:
+            return self.calib_dxdy_bins["far"]
+        if (near_end + b) <= r_m <= (mid_end - b):
+            return self.calib_dxdy_bins["mid"]
+
+        # near <-> mid blend
+        if (near_end - b) <= r_m <= (near_end + b):
+            t = (r_m - (near_end - b)) / (2.0 * b)
+            return (1 - t) * self.calib_dxdy_bins["near"] + t * self.calib_dxdy_bins["mid"]
+
+        # mid <-> far blend
+        if (mid_end - b) <= r_m <= (mid_end + b):
+            t = (r_m - (mid_end - b)) / (2.0 * b)
+            return (1 - t) * self.calib_dxdy_bins["mid"] + t * self.calib_dxdy_bins["far"]
+
+        return self.calib_dxdy_bins[self._bin_name_for_dist(r_m)]
+
     def corrected_pose(self):
-        if not self.is_initialized:
+        if self.raw_center is None:
             return None
-        c = self.kf.pos + self.calib_dxdy
-        h = wrap_pi(self.yaw_state + self.calib_yaw_offset)
+        r = float(self.last_best_ground_m) if self.last_best_ground_m is not None else 0.0
+        dxdy = self._dxdy_for_dist(r)
+        c = self.raw_center + dxdy
+        h = wrap_pi(self.raw_heading + self.calib_yaw_offset)
         return c, h
 
     # -------------------------
     # Click sampling + recompute
     # -------------------------
     def add_center_sample(self, clicked_xy: np.ndarray, weight: float):
-        if not self.is_initialized:
+        if self.raw_center is None:
             return
-        raw_center = self.kf.pos
-        dxdy_need = (clicked_xy - raw_center).astype(np.float32)
+        r = float(self.last_best_ground_m) if self.last_best_ground_m is not None else 0.0
+        bin_name = self._bin_name_for_dist(r)
+        dxdy_need = (clicked_xy - self.raw_center).astype(np.float32)
+
         self.samples.append({
             "type": "center",
+            "bin": bin_name,
+            "r_m": float(r),
             "dx": float(dxdy_need[0]),
             "dy": float(dxdy_need[1]),
             "w": float(max(0.001, weight)),
@@ -383,7 +386,7 @@ class WheelchairTracker:
     def add_yaw_sample(self, clicked_heading_rad: float, weight: float):
         if not self.is_initialized:
             return
-        off = wrap_pi(float(clicked_heading_rad) - float(self.yaw_state))
+        off = wrap_pi(float(clicked_heading_rad) - float(self.raw_heading))
         self.samples.append({
             "type": "yaw",
             "off": float(off),
@@ -392,19 +395,31 @@ class WheelchairTracker:
         })
 
     def recompute_calibration_from_samples(self):
-        # center weighted mean
-        sx = sy = sw = 0.0
+        # center bins weighted mean
+        acc = {
+            "near": {"sx": 0.0, "sy": 0.0, "sw": 0.0},
+            "mid":  {"sx": 0.0, "sy": 0.0, "sw": 0.0},
+            "far":  {"sx": 0.0, "sy": 0.0, "sw": 0.0},
+        }
+
         for s in self.samples:
             if s.get("type") != "center":
                 continue
             w = float(s.get("w", 1.0))
-            sx += float(s["dx"]) * w
-            sy += float(s["dy"]) * w
-            sw += w
-        if sw > 1e-9:
-            self.calib_dxdy = np.array([sx / sw, sy / sw], dtype=np.float32)
+            b = s.get("bin", "mid")
+            if b not in acc:
+                b = "mid"
+            acc[b]["sx"] += float(s["dx"]) * w
+            acc[b]["sy"] += float(s["dy"]) * w
+            acc[b]["sw"] += w
 
-        # yaw circular mean
+        for b in ("near", "mid", "far"):
+            if acc[b]["sw"] > 1e-9:
+                self.calib_dxdy_bins[b] = np.array([acc[b]["sx"] / acc[b]["sw"],
+                                                    acc[b]["sy"] / acc[b]["sw"]],
+                                                   dtype=np.float32)
+
+        # yaw weighted circular mean
         ss = cc = sw2 = 0.0
         for s in self.samples:
             if s.get("type") != "yaw":
@@ -417,6 +432,9 @@ class WheelchairTracker:
         if sw2 > 1e-9:
             self.calib_yaw_offset = math.atan2(ss, cc)
 
+        # 구버전용 전역 dxdy는 mid를 복사
+        self.calib_dxdy = self.calib_dxdy_bins["mid"].copy()
+
     # -------------------------
     # Mouse callback
     # -------------------------
@@ -425,38 +443,61 @@ class WheelchairTracker:
             return
 
         pt = np.array([float(x), float(y)], dtype=np.float32)
+        wq = self._click_quality_weight()
 
-        # 매우 단순 가중치(그냥 1로 누적)
-        w = 1.0
-
+        # center mode
         if self.click_mode == "set_center":
             corr = self.corrected_pose()
             if corr is None:
                 self.click_mode = None
                 return
+
             corr_center, _ = corr
+            err_px = float(np.linalg.norm(pt - corr_center))
+            we = self._err_weight_center(err_px)
+            w = float(wq * we)
+
+            # ✅ "현재 거리 bin"의 dxdy만 즉시 업데이트
+            r = float(self.last_best_ground_m) if self.last_best_ground_m is not None else 0.0
+            bname = self._bin_name_for_dist(r)
             delta = (pt - corr_center).astype(np.float32)
-            # 보정값 누적(“정답 클릭” 기준)
-            self.calib_dxdy = self.calib_dxdy + delta
+            self.calib_dxdy_bins[bname] = self.calib_dxdy_bins[bname] + delta
+
+            # 샘플 누적(raw 기준)
             self.add_center_sample(pt, w)
+
+            self.last_click_info = {
+                "mode": "center",
+                "err_px": err_px,
+                "wq": wq,
+                "we": we,
+                "w": w,
+                "r_m": r,
+                "bin": bname
+            }
+
             self.click_mode = None
-            print(f"[CENTER CLICK] +dxdy=({delta[0]:.1f},{delta[1]:.1f})  samples={len(self.samples)}")
+            print(f"[CENTER CLICK] bin={bname} r={r:.2f}m err={err_px:.1f}px w={w:.2f} samples={len(self.samples)}")
             return
 
+        # yaw step1
         if self.click_mode == "set_yaw_center":
             self.tmp_yaw_center = pt
             self.click_mode = "set_yaw_dir"
             print("[YAW CLICK] center picked. Now click direction point.")
             return
 
+        # yaw step2
         if self.click_mode == "set_yaw_dir":
             if self.tmp_yaw_center is None:
                 self.click_mode = None
                 return
+
             v = (pt - self.tmp_yaw_center).astype(np.float32)
             if float(np.linalg.norm(v)) < 1e-3:
                 print("[YAW CLICK] direction too small. retry.")
                 return
+
             clicked_heading = float(math.atan2(float(v[1]), float(v[0])))
 
             corr = self.corrected_pose()
@@ -464,14 +505,28 @@ class WheelchairTracker:
                 self.click_mode = None
                 self.tmp_yaw_center = None
                 return
+
             _, corr_heading = corr
+            err_rad = float(wrap_pi(clicked_heading - corr_heading))
+            we = self._err_weight_yaw(abs(err_rad))
+            w = float(wq * we)
+
             d = wrap_pi(clicked_heading - corr_heading)
             self.calib_yaw_offset = wrap_pi(self.calib_yaw_offset + d)
+
             self.add_yaw_sample(clicked_heading, w)
+
+            self.last_click_info = {
+                "mode": "yaw",
+                "err_deg": float(abs(math.degrees(err_rad))),
+                "wq": wq,
+                "we": we,
+                "w": w
+            }
 
             self.click_mode = None
             self.tmp_yaw_center = None
-            print(f"[YAW CLICK] +yaw_off={math.degrees(d):.1f}deg  samples={len(self.samples)}")
+            print(f"[YAW CLICK] err={abs(math.degrees(err_rad)):.1f}deg w={w:.2f} samples={len(self.samples)}")
             return
 
     # -------------------------
@@ -490,7 +545,12 @@ class WheelchairTracker:
                 continue
 
             c2 = corners[i].reshape(4, 2).astype(np.float32)
-            und = cv2.fisheye.undistortPoints(corners[i].reshape(-1, 1, 2), K, D, P=K)
+
+            # fisheye undistort
+            und = cv2.fisheye.undistortPoints(
+                corners[i].reshape(-1, 1, 2),
+                K, D, P=K
+            )
 
             ok, rvec, tvec = cv2.solvePnP(OBJ_POINTS, und, K, None, flags=cv2.SOLVEPNP_ITERATIVE)
             if not ok:
@@ -528,7 +588,7 @@ class WheelchairTracker:
             heading_map = compass_deg_to_map_rad(yaw_compass)
             center_pos = self.marker_to_center(marker_pos, heading_map, mid)
 
-            # quality
+            # quality calc
             area = float(abs(cv2.contourArea(c2)))
             proj, _ = cv2.projectPoints(OBJ_POINTS, rvec, tvec, K, None)
             proj = proj.reshape(-1, 2).astype(np.float32)
@@ -541,12 +601,13 @@ class WheelchairTracker:
             s_err = self.smooth01(reproj_err, self.reproj_good_px, self.reproj_bad_px)
             quality = max(self.min_quality_w, (0.45 * s_err + 0.45 * s_area + 0.10 * z_score))
 
-            # fuse weight (기존 로직 유지)
             cx = float(np.mean(c2[:, 0]))
             rel_x = (cx - frame.shape[1] / 2) / (frame.shape[1] / 2)
+
             w_center = max(0.1, 1.0 - abs(rel_x))
             w_dist = 1.0 / (1.0 + ground_m)
             w_base = float(max(0.05, w_center * w_dist))
+
             w = float(w_base * quality)
 
             dets.append({
@@ -572,6 +633,7 @@ class WheelchairTracker:
         total_w = sum(d["weight"] for d in dets)
         if total_w <= 1e-9:
             return None
+
         center = sum(d["center_pos"] * d["weight"] for d in dets) / total_w
         s = sum(math.sin(d["heading"]) * d["weight"] for d in dets) / total_w
         c = sum(math.cos(d["heading"]) * d["weight"] for d in dets) / total_w
@@ -579,122 +641,47 @@ class WheelchairTracker:
         return center, heading
 
     # -------------------------
-    # Anti flip-flop when both cams see it
-    # -------------------------
-    def _prefer_closer_cam_if_conflict(self, dets):
-        if not dets:
-            return dets
-
-        by_cam = {"rear": [], "left": []}
-        for d in dets:
-            by_cam.get(d["cam_key"], []).append(d)
-
-        if not by_cam["rear"] or not by_cam["left"]:
-            return dets
-
-        best_r = max(by_cam["rear"], key=lambda x: x["weight"])
-        best_l = max(by_cam["left"], key=lambda x: x["weight"])
-
-        cr = best_r["center_pos"]
-        cl = best_l["center_pos"]
-        diff = float(np.linalg.norm(cr - cl))
-
-        # 두 카메라 결과가 GatePos보다 많이 벌어지면 → 더 가까운 카메라만 채택
-        if diff > self.gate_pos_px:
-            gr = float(best_r["dbg_quality"]["ground_m"])
-            gl = float(best_l["dbg_quality"]["ground_m"])
-            return by_cam["rear"] if gr <= gl else by_cam["left"]
-
-        return dets
-
-    # -------------------------
-    # Filters update
-    # -------------------------
-    def _update_filters(self, meas_center, meas_yaw, dt, dist_cm, meas_quality):
-        # 1) Kalman predict
-        # resp -> q_acc 스케일 (높을수록 더 잘 따라감)
-        q_acc = 50.0 * (self.resp ** 2)  # 경험적 스케일
-        self.kf.predict(dt, q_acc=q_acc)
-
-        # 2) gating + Kalman update (position)
-        if self.kf.initialized:
-            pred = self.kf.pos
-            dpos = float(np.linalg.norm(meas_center - pred))
-            if dpos <= self.gate_pos_px:
-                # 측정 노이즈: 멀수록/품질 낮을수록 크게
-                base_sigma = 18.0  # px
-                sigma = base_sigma * (1.0 + 0.003 * dist_cm) / max(0.15, float(meas_quality))
-                r_pos = sigma * sigma
-                self.kf.update(float(meas_center[0]), float(meas_center[1]), r_pos=r_pos)
-        else:
-            self.kf.init(float(meas_center[0]), float(meas_center[1]))
-
-        # 3) yaw: circular mean buffer + clip/jump
-        if not self.is_initialized:
-            self.yaw_state = float(meas_yaw)
-            self.yaw_buf.clear()
-            self.yaw_buf.append(float(meas_yaw))
-            return
-
-        dy = wrap_pi(float(meas_yaw) - float(self.yaw_state))
-        if abs(math.degrees(dy)) <= self.gate_yaw_deg:
-            self.yaw_buf.append(float(meas_yaw))
-
-        target = circular_mean(list(self.yaw_buf))
-        if target is None:
-            target = float(meas_yaw)
-
-        dy2 = wrap_pi(float(target) - float(self.yaw_state))
-        abs_dy2_deg = abs(math.degrees(dy2))
-
-        # 급회전/재획득이면 즉시 점프 + 버퍼 리셋
-        if abs_dy2_deg >= self.jump_yaw_deg:
-            self.yaw_state = float(target)
-            self.yaw_buf.clear()
-            self.yaw_buf.append(float(self.yaw_state))
-            return
-
-        # 멀면 프레임당 변화 제한(튐 억제)
-        if dist_cm >= self.far_cm:
-            lim = math.radians(self.clip_yaw_deg)
-        else:
-            lim = math.radians(180.0)  # 가까우면 제한 거의 없음(빠릿)
-        dy2 = clamp(dy2, -lim, lim)
-        self.yaw_state = wrap_pi(float(self.yaw_state) + float(dy2))
-
-    # -------------------------
     # Drawing
     # -------------------------
-    def _draw_grid(self, img, x0, y0, w, h, step, col_minor, col_major, major_step):
-        for x in range(0, w + 1, step):
-            col = col_major if (x % major_step) == 0 else col_minor
-            cv2.line(img, (x0 + x, y0), (x0 + x, y0 + h), col, 1)
-        for y in range(0, h + 1, step):
-            col = col_major if (y % major_step) == 0 else col_minor
-            cv2.line(img, (x0, y0 + y), (x0 + w, y0 + y), col, 1)
-
     def draw_static_map(self, img):
-        grid_step_cm = 20
-        step = max(1, int(grid_step_cm * self.map_scale))
-        major_step = max(1, int(100 * self.map_scale))
+        # ✅ 1000x1000 전체 격자도 그리기 + 600x720 유효영역 격자 강조
+        grid_step_cm = 20   # 20cm 간격
+        step = max(1, int(grid_step_cm * self.map_scale))     # 1px=1cm -> 20px
+        major_step = max(1, int(100 * self.map_scale))        # 1m 간격(굵게)
 
-        self._draw_grid(img, 0, 0, self.map_w - 1, self.map_h - 1,
-                        step, (25, 25, 25), (45, 45, 45), major_step)
-        self._draw_grid(img, self.off_x, self.off_y, self.grid_w, self.grid_h,
-                        step, (45, 45, 45), (80, 80, 80), major_step)
+        # 전체 1000x1000 그리드(연하게)
+        for x in range(0, self.map_w + 1, step):
+            col = (20, 20, 20) if (x % major_step) != 0 else (40, 40, 40)
+            cv2.line(img, (x, 0), (x, self.map_h), col, 1)
+        for y in range(0, self.map_h + 1, step):
+            col = (20, 20, 20) if (y % major_step) != 0 else (40, 40, 40)
+            cv2.line(img, (0, y), (self.map_w, y), col, 1)
 
+        # 유효영역 600x720 격자(조금 진하게)
+        for x in range(0, self.grid_w + 1, step):
+            col = (45, 45, 45) if (x % major_step) != 0 else (85, 85, 85)
+            cv2.line(img, (self.off_x + x, self.off_y),
+                     (self.off_x + x, self.off_y + self.grid_h), col, 1)
+        for y in range(0, self.grid_h + 1, step):
+            col = (45, 45, 45) if (y % major_step) != 0 else (85, 85, 85)
+            cv2.line(img, (self.off_x, self.off_y + y),
+                     (self.off_x + self.grid_w, self.off_y + y), col, 1)
+
+        # 유효영역 경계
         cv2.rectangle(img, (self.off_x, self.off_y),
                       (self.off_x + self.grid_w, self.off_y + self.grid_h), (200, 200, 200), 2)
 
+        # car zone
         cv2.rectangle(img, self.car_zone[0], self.car_zone[1], (35, 35, 45), -1)
 
+        # cameras
         for cam in self.cams.values():
             cp = tuple(cam.pos_px.astype(int))
             cv2.circle(img, cp, 6, (220, 220, 220), -1)
             cv2.putText(img, cam.key, (cp[0] + 8, cp[1] - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1, cv2.LINE_AA)
 
-    def draw_wheelchair(self, img, center, heading, color=(0, 255, 0), label="KF(corr)"):
+    def draw_wheelchair(self, img, center, heading, color=(0, 255, 0), label="FUSED(corr)"):
         w_px = (self.wc_w_cm * self.map_scale) / 2.0
         l_px = (self.wc_l_cm * self.map_scale) / 2.0
         base = np.array([[-l_px, -w_px], [l_px, -w_px], [l_px, w_px], [-l_px, w_px]], dtype=np.float32)
@@ -710,29 +697,31 @@ class WheelchairTracker:
                         (int(center[0] + arrow_len_px * math.cos(heading)),
                          int(center[1] + arrow_len_px * math.sin(heading))),
                         color, 2, cv2.LINE_AA)
+
         cv2.putText(img, label, (int(center[0]) + 10, int(center[1]) + 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
 
-    def draw_hud(self, img, dets, dt, dist_cm):
-        y = 22
-        cv2.putText(img, f"dt={dt*1000:.0f}ms  Resp={self.resp:.2f}", (10, y), 0, 0.55, (220, 220, 220), 2, cv2.LINE_AA); y += 20
-        cv2.putText(img, f"rear_gain={self.cams['rear'].dist_gain:.2f} left_gain={self.cams['left'].dist_gain:.2f}", (10, y),
-                    0, 0.55, (220, 220, 220), 2, cv2.LINE_AA); y += 20
-        cv2.putText(img, f"GatePos={self.gate_pos_px:.0f}px GateYaw={self.gate_yaw_deg:.0f}deg", (10, y),
-                    0, 0.55, (220, 220, 220), 2, cv2.LINE_AA); y += 20
-        cv2.putText(img, f"Far={self.far_cm:.0f}cm ClipYaw={self.clip_yaw_deg:.0f}deg JumpYaw={self.jump_yaw_deg:.0f}deg YawN={self.yaw_buf.maxlen}", (10, y),
-                    0, 0.55, (220, 220, 220), 2, cv2.LINE_AA); y += 20
+    def draw_hud(self, img, dets):
+        # 방어: 혹시 합치다 누락돼도 죽지 않게
+        if not hasattr(self, "click_mode"):
+            self.click_mode = None
 
-        if self.kf.initialized:
-            pos = self.kf.pos
-            # 맵 평면 2D거리(카메라 -> 휠체어 중심), 1px=1cm
-            dr = float(np.linalg.norm(pos - self.cams["rear"].pos_px))
-            dl = float(np.linalg.norm(pos - self.cams["left"].pos_px))
-            cv2.putText(img, f"2Ddist->rear={dr:.0f}cm left={dl:.0f}cm  bestGround={dist_cm:.0f}cm", (10, y),
-                        0, 0.55, (220, 220, 220), 2, cv2.LINE_AA); y += 20
+        y = 20
+        cv2.putText(img, f"alpha={self.alpha:.2f}", (10, y), 0, 0.6, (220, 220, 220), 2, cv2.LINE_AA); y += 22
+        cv2.putText(img, f"rear_gain={self.cams['rear'].dist_gain:.2f}  left_gain={self.cams['left'].dist_gain:.2f}",
+                    (10, y), 0, 0.6, (220, 220, 220), 2, cv2.LINE_AA); y += 22
 
-        cv2.putText(img, f"calib_dxdy=({self.calib_dxdy[0]:.1f},{self.calib_dxdy[1]:.1f})  yaw_off={math.degrees(self.calib_yaw_offset):.1f}deg samples={len(self.samples)} dets={len(dets)}",
-                    (10, y), 0, 0.50, (200, 200, 200), 2, cv2.LINE_AA); y += 20
+        r = float(self.last_best_ground_m) if self.last_best_ground_m is not None else 0.0
+        bname = self._bin_name_for_dist(r)
+        dxdy_now = self._dxdy_for_dist(r)
+        cv2.putText(img, f"dist={r:.2f}m bin={bname} dxdy=({dxdy_now[0]:.1f},{dxdy_now[1]:.1f})",
+                    (10, y), 0, 0.55, (220, 220, 220), 2, cv2.LINE_AA); y += 20
+
+        cv2.putText(img, f"CenterSigma={self.center_sigma_px:.0f}px  YawSigma={self.yaw_sigma_deg:.0f}deg",
+                    (10, y), 0, 0.55, (220, 220, 220), 2, cv2.LINE_AA); y += 20
+
+        cv2.putText(img, f"yaw_off={math.degrees(self.calib_yaw_offset):.1f}deg  samples={len(self.samples)} dets={len(dets)}",
+                    (10, y), 0, 0.55, (220, 220, 220), 2, cv2.LINE_AA); y += 20
 
         if self.click_mode == "set_center":
             cv2.putText(img, "MODE: center -> click TRUE center point", (10, y), 0, 0.65, (0, 255, 255), 2, cv2.LINE_AA); y += 24
@@ -746,7 +735,21 @@ class WheelchairTracker:
             q = best.get("dbg_quality", {})
             self.last_best_quality = float(q.get("quality", 0.5))
             cv2.putText(img, f"best[{best['cam_key']}/ID{best['marker_id']}] q={q.get('quality',0):.2f} area={q.get('area',0):.0f} reproj={q.get('reproj',0):.2f}",
-                        (10, y), 0, 0.50, (180, 180, 180), 2, cv2.LINE_AA)
+                        (10, y), 0, 0.5, (200, 200, 200), 2, cv2.LINE_AA)
+        else:
+            self.last_best_quality = None
+
+        if self.last_click_info is not None:
+            y += 18
+            if self.last_click_info.get("mode") == "center":
+                cv2.putText(img,
+                            f"lastClick(center): bin={self.last_click_info.get('bin','?')} r={self.last_click_info.get('r_m',0):.2f}m "
+                            f"err={self.last_click_info['err_px']:.1f}px w={self.last_click_info['w']:.2f}",
+                            (10, y), 0, 0.5, (180, 180, 180), 2, cv2.LINE_AA)
+            else:
+                cv2.putText(img,
+                            f"lastClick(yaw): err={self.last_click_info.get('err_deg',0):.1f}deg w={self.last_click_info.get('w',0):.2f}",
+                            (10, y), 0, 0.5, (180, 180, 180), 2, cv2.LINE_AA)
 
     # -------------------------
     # Loop
@@ -754,11 +757,6 @@ class WheelchairTracker:
     def run(self):
         while True:
             self.update_from_trackbars()
-
-            now = time.time()
-            dt = now - self.last_t
-            self.last_t = now
-            dt = float(clamp(dt, 1/120.0, 1/10.0))  # 너무 튀는 dt 방지
 
             ok0, fr0 = self.cap_rear.read()
             ok1, fr1 = self.cap_left.read()
@@ -778,38 +776,21 @@ class WheelchairTracker:
                 self.last_best_det = None
                 self.last_best_ground_m = None
 
-            # flip-flop 억제
-            dets2 = self._prefer_closer_cam_if_conflict(dets)
-
-            fused = self.fuse(dets2)
-            dist_cm = (self.last_best_ground_m * 100.0) if self.last_best_ground_m is not None else 9999.0
-
+            fused = self.fuse(dets)
             if fused is not None:
-                meas_center, meas_yaw = fused
-                self.last_meas = fused
-
-                # 초기화
-                if not self.is_initialized:
-                    self.kf.init(float(meas_center[0]), float(meas_center[1]))
-                    self.yaw_state = float(meas_yaw)
-                    self.yaw_buf.clear()
-                    self.yaw_buf.append(float(meas_yaw))
-                    self.is_initialized = True
-                else:
-                    # meas_quality는 best 기준(없으면 0.5)
-                    mq = float(self.last_best_quality) if self.last_best_quality is not None else 0.5
-                    self._update_filters(meas_center, meas_yaw, dt, dist_cm, mq)
-            else:
-                # 측정 없으면 예측만
+                center, heading = fused
                 if self.is_initialized:
-                    q_acc = 50.0 * (self.resp ** 2)
-                    self.kf.predict(dt, q_acc=q_acc)
+                    self.raw_center = self.raw_center * (1 - self.alpha) + center * self.alpha
+                    diff = wrap_pi(heading - self.raw_heading)
+                    self.raw_heading = wrap_pi(self.raw_heading + diff * self.alpha)
+                else:
+                    self.raw_center = center
+                    self.raw_heading = heading
+                    self.is_initialized = True
 
-            # draw
             m = np.ones((self.map_h, self.map_w, 3), dtype=np.uint8) * 15
             self.draw_static_map(m)
 
-            # raw detections
             for d in dets:
                 mp = tuple(d["marker_pos"].astype(int))
                 cc = tuple(d["center_pos"].astype(int))
@@ -821,9 +802,9 @@ class WheelchairTracker:
             corr = self.corrected_pose()
             if corr is not None:
                 cpos, chead = corr
-                self.draw_wheelchair(m, cpos, chead, color=(0, 255, 0), label="KF(corr)")
+                self.draw_wheelchair(m, cpos, chead, color=(0, 255, 0), label="FUSED(corr)")
 
-            self.draw_hud(m, dets2, dt, dist_cm)
+            self.draw_hud(m, dets)
 
             mon0 = cv2.resize(fr0, (640, 360))
             mon1 = cv2.resize(fr1, (640, 360))
@@ -836,25 +817,24 @@ class WheelchairTracker:
 
             if key == ord('r'):
                 self.is_initialized = False
-                self.kf.reset()
-                self.yaw_buf.clear()
-                self.yaw_state = 0.0
-                print("[RESET] filter state reset")
+                self.raw_center = None
+                self.raw_heading = 0.0
+                print("[RESET] raw fused state reset")
 
             if key == ord('c'):
                 self.click_mode = "set_center"
                 self.tmp_yaw_center = None
-                print("[MODE] center calibration: click TRUE center point on map")
+                print("[MODE] center calibration: click TRUE center point (거리별 bin 저장)")
 
             if key == ord('a'):
                 self.click_mode = "set_yaw_center"
                 self.tmp_yaw_center = None
-                print("[MODE] yaw calibration: click CENTER point then DIRECTION point")
+                print("[MODE] yaw calibration: click CENTER then DIRECTION")
 
             if key == ord('s'):
                 self.recompute_calibration_from_samples()
                 self._save_calibration()
-                print("[APPLY] recomputed from samples and saved")
+                print("[APPLY] recomputed from samples and saved (distance-bins)")
 
         self.cap_rear.release()
         self.cap_left.release()
