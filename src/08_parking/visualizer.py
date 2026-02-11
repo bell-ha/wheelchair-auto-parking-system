@@ -43,27 +43,15 @@ class Visualizer:
             cv2.circle(img, (ox, oy), r, (0, 0, 150), -1)
             cv2.circle(img, (ox, oy), r, (0, 0, 255), 2)
     
-    def draw_goals(self, img, goals, stage, goal_idx, parking_mode):
-        """목표 지점 그리기"""
-        for si, stage_goals in enumerate(goals):
-            for gi, g in enumerate(stage_goals):
-                gp = (int(g[0]), int(g[1]))
-                is_curr = (si == stage and gi == goal_idx)
-                col = (0, 255, 0) if is_curr else (100, 100, 100)
-                cv2.circle(img, gp, 10, col, -1 if is_curr else 2)
-                cv2.putText(img, f"S{si}", (gp[0]-8, gp[1]-15), 0, 0.4, col, 1)
-                
-                if g[2] is not None:
-                    ax = int(gp[0] + 25 * math.cos(math.radians(g[2])))
-                    ay = int(gp[1] + 25 * math.sin(math.radians(g[2])))
-                    cv2.arrowedLine(img, gp, (ax, ay), (150, 150, 255), 2, tipLength=0.4)
-    
-    def draw_exit_goals(self, img, exit_goals, exit_choice):
-        """출차 최종 목표 그리기"""
-        for i, g in enumerate(exit_goals[2]):
-            gp = (int(g[0]), int(g[1]))
-            col = (255, 100, 0) if i == exit_choice else (80, 80, 80)
-            cv2.circle(img, gp, 8, col, -1 if i == exit_choice else 2)
+    def draw_parking_goal(self, img, goal):
+        """주차 최종 목표 지점 그리기 (녹색)"""
+        cv2.circle(img, (int(goal[0]), int(goal[1])), 12, (0, 255, 0), -1)
+        cv2.putText(img, "PARK GOAL", (int(goal[0])-40, int(goal[1])-20), 0, 0.5, (0, 255, 0), 2)
+
+    def draw_exit_goal(self, img, goal):
+        """출차 최종 목표 지점 그리기 (주황색)"""
+        cv2.circle(img, (int(goal[0]), int(goal[1])), 12, (255, 100, 0), -1)
+        cv2.putText(img, "EXIT GOAL", (int(goal[0])-40, int(goal[1])-20), 0, 0.5, (255, 100, 0), 2)
     
     def draw_path(self, img, path, center, heading_angle):
         """경로 및 회전 정보 그리기"""
@@ -195,212 +183,105 @@ class Visualizer:
             3
         )
     
-    def draw_phase_guidance(self, img, center, heading_angle, current_phase, phase_controller, car_pos, target_y_px):
-        """
-        Phase별 맞춤 시각화
-        
-        Args:
-            img: 이미지
-            center: 휠체어 중심 위치 [x, y] (픽셀) - PhaseController와 동일한 값
-            heading_angle: 현재 방향각 (라디안)
-            current_phase: 현재 Phase 번호 (1~7)
-            phase_controller: PhaseController 인스턴스
-            car_pos: 차량 위치 (car_x, car_y)
-            target_y_px: Phase 2 목표 Y 좌표 (픽셀)
-        """
+    def draw_phase_guidance(self, img, center, heading_angle, current_phase, phase_controller, car_pos, goal_pos, exit_goal=None, phase_mode_text=""):
         import math
-        
         center_pt = (int(center[0]), int(center[1]))
         current_yaw_deg = math.degrees(heading_angle)
+        info_y_start = 120
+
+        is_parking = phase_controller.is_parking
+        mode_text = "PARKING MODE" if is_parking else "EXIT MODE"
+        mode_color = (0, 255, 100) if is_parking else (255, 100, 100)
+        cv2.putText(img, mode_text, (10, 50), 0, 0.7, mode_color, 2)
+
+        # === 우측 상단 Phase 박스 시각화 (동적 텍스트 적용) ===
+        # 텍스트가 길어질 수 있으므로 박스 너비를 300 정도로 넓게 잡습니다.
+        bx, by, bw, bh = self.map_w - 310, 10, 300, 60
         
-        # Phase 정보 박스 (우측 상단)
-        phase_info = {
-            1: ("PHASE 1: ALIGNING", (255, 200, 100)),
-            2: ("PHASE 2: APPROACHING", (100, 255, 200)),
-            3: ("PHASE 3: ROTATING", (255, 150, 100)),
-            4: ("PHASE 4: X-ALIGN", (200, 100, 255)),
-            5: ("PHASE 5: FINAL ALIGN", (255, 100, 200)),
-            6: ("PHASE 6: ENTERING", (100, 255, 100)),
-            7: ("COMPLETE", (0, 255, 0))
-        }
+        # 단계에 따른 박스 색상 결정
+        if current_phase >= 7:
+            box_color = (0, 255, 0) # 완료 시 초록색
+        else:
+            box_color = (255, 200, 100) if is_parking else (100, 200, 255)
+
+        # 배경 및 테두리 그리기
+        cv2.rectangle(img, (bx, by), (bx + bw, by + bh), (30, 30, 30), -1)
+        cv2.rectangle(img, (bx, by), (bx + bw, by + bh), box_color, 3)
+
+        # [핵심] phase_mode_text(control_mode)를 직접 출력
+        cv2.putText(img, phase_mode_text, (bx + 15, by + 40), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.55, box_color, 2)
+
+        # --- 내부 유틸리티 2: 공통 시각화 함수 정의 ---
+        def draw_info_text(labels):
+            for i, (txt, col) in enumerate(labels):
+                cv2.putText(img, txt, (10, info_y_start + (i * 30)), 0, 0.6, col, 2)
+
+        def draw_angle_guide(target_deg, arc_c, arrow_c):
+            radius = 100
+            for deg, color in [(current_yaw_deg, (255, 255, 255)), (target_deg, arrow_c)]:
+                rad = math.radians(deg)
+                tip = (int(center[0] + radius * math.cos(rad)), int(center[1] + radius * math.sin(rad)))
+                cv2.arrowedLine(img, center_pt, tip, color, 3, tipLength=0.3)
+            diff = target_deg - current_yaw_deg
+            if abs(diff) > 180: diff = diff - 360 if diff > 0 else diff + 360
+            cv2.ellipse(img, center_pt, (radius, radius), 0, -current_yaw_deg, -target_deg, arc_c, 3)
+            draw_info_text([(f"Current: {current_yaw_deg:.1f}deg", (255, 255, 255)), 
+                            (f"Target: {target_deg:.1f}deg", arrow_c), (f"To Rotate: {diff:+.1f}deg", arc_c)])
+
+        def draw_y_guide(target_y, color):
+            ly = int(target_y)
+            cv2.line(img, (0, ly), (self.map_w, ly), (0, 255, 255), 2)
+            cv2.line(img, center_pt, (int(center[0]), ly), color, 2, cv2.LINE_AA)
+            draw_info_text([(f"Dist Y: {abs(center[1]-target_y):.1f}px", color)])
+
+        def draw_x_guide(target_x, color):
+            lx = int(target_x)
+            cv2.line(img, (lx, 0), (lx, self.map_h), (200, 100, 255), 2)
+            cv2.line(img, center_pt, (lx, int(center[1])), color, 2, cv2.LINE_AA)
+            draw_info_text([(f"Offset X: {abs(center[0]-target_x):.1f}px", color)])
+
+        # --- 메인 시각화 로직 ---
+
+        if is_parking:
+            # ================= PARKING 시나리오 =================
+            if current_phase in [1, 3, 5]:
+                # 주차 각도 정렬 (P1, P3, P5)
+                target = (phase_controller.p1_min + phase_controller.p1_max)/2 if current_phase == 1 else \
+                         (phase_controller.p3_min + phase_controller.p3_max)/2 if current_phase == 3 else \
+                         (phase_controller.p5_min + phase_controller.p5_max)/2
+                draw_angle_guide(target, (100, 255, 255), (0, 255, 0))
+            elif current_phase == 2:
+                draw_y_guide(goal_pos[1], (100, 255, 100)) # Y축 접근
+            elif current_phase == 4:
+                draw_x_guide(goal_pos[0], (150, 100, 255)) # X축 정렬
+            elif current_phase == 6:
+                draw_info_text([("Entering Spot...", (100, 255, 100))])
+                tx, ty = int(center[0] + 80 * math.cos(heading_angle)), int(center[1] + 80 * math.sin(heading_angle))
+                cv2.arrowedLine(img, center_pt, (tx, ty), (100, 255, 100), 4, tipLength=0.3)
         
-        if current_phase in phase_info:
-            phase_name, phase_color = phase_info[current_phase]
+        else:
+            # ================= EXIT 시나리오 =================
+            # 1. 출차 P1: Y축 후진 (주차 목표선 기준 가로선)
+            if current_phase == 1:
+                draw_y_guide(goal_pos[1], (255, 150, 150))
             
-            # Phase 박스 배경 (우측 상단)
-            box_x, box_y = self.map_w - 250, 10
-            box_w, box_h = 240, 60
+            # 2. 출차 P2 & P4: 각도 정렬 (주차와 반대 방향)
+            elif current_phase in [2, 4]:
+                # UnifiedPhaseController에서 부호 반전된 값을 p3(P2용), p1(P4용)으로 이미 가지고 있음
+                target = (phase_controller.p3_min + phase_controller.p3_max)/2 if current_phase == 2 else \
+                         (phase_controller.p1_min + phase_controller.p1_max)/2
+                draw_angle_guide(target, (255, 200, 100), (255, 150, 0))
+
+            # 3. 출차 P3: X축 이동 (요청하신 X축 정렬선)
+            elif current_phase == 3:
+                if exit_goal:
+                    draw_x_guide(exit_goal[0], (200, 100, 255))
             
-            cv2.rectangle(img, (box_x, box_y), (box_x + box_w, box_y + box_h), (30, 30, 30), -1)
-            cv2.rectangle(img, (box_x, box_y), (box_x + box_w, box_y + box_h), phase_color, 3)
-            
-            cv2.putText(img, phase_name, (box_x + 10, box_y + 40), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, phase_color, 2)
-        
-        # === Phase별 시각화 ===
-        
-        # PHASE 1: 각도 정렬 (-90.5 ~ -89.5도)
-        if current_phase == 1:
-            target_min = phase_controller.p1_min
-            target_max = phase_controller.p1_max
-            target_avg = (target_min + target_max) / 2
-            
-            # 목표 각도 범위 표시
-            arc_radius = 100
-            
-            # 현재 각도 화살표 (흰색)
-            curr_x = int(center[0] + arc_radius * math.cos(heading_angle))
-            curr_y = int(center[1] + arc_radius * math.sin(heading_angle))
-            cv2.arrowedLine(img, center_pt, (curr_x, curr_y), (255, 255, 255), 3, tipLength=0.3)
-            
-            # 목표 각도 범위 (녹색 호)
-            target_rad = math.radians(target_avg)
-            target_x = int(center[0] + arc_radius * math.cos(target_rad))
-            target_y = int(center[1] + arc_radius * math.sin(target_rad))
-            cv2.arrowedLine(img, center_pt, (target_x, target_y), (0, 255, 0), 3, tipLength=0.3)
-            
-            # 회전 방향 호
-            angle_diff = target_avg - current_yaw_deg
-            if abs(angle_diff) > 180:
-                angle_diff = angle_diff - 360 if angle_diff > 0 else angle_diff + 360
-            
-            arc_color = (100, 255, 255)
-            cv2.ellipse(img, center_pt, (arc_radius, arc_radius), 0, 
-                       -current_yaw_deg, -target_avg, arc_color, 3)
-            
-            # 텍스트 정보
-            info_y = 120
-            cv2.putText(img, f"Current: {current_yaw_deg:.1f}deg", (10, info_y), 
-                       0, 0.6, (255, 255, 255), 2)
-            cv2.putText(img, f"Target: {target_avg:.1f}deg", (10, info_y + 30), 
-                       0, 0.6, (0, 255, 0), 2)
-            cv2.putText(img, f"To Rotate: {angle_diff:+.1f}deg", (10, info_y + 60), 
-                       0, 0.6, (100, 255, 255), 2)
-        
-        # PHASE 2: Y축 주행 (목표 Y까지 직진)
-        elif current_phase == 2:
-            # Y축 목표선 그리기 (가로선)
-            line_y = int(target_y_px)
-            cv2.line(img, (0, line_y), (self.map_w, line_y), (0, 255, 255), 2)
-            cv2.putText(img, "TARGET Y", (10, line_y - 10), 0, 0.5, (0, 255, 255), 2)
-            
-            # 현재 위치에서 목표까지 수직선
-            cv2.line(img, center_pt, (int(center[0]), line_y), (100, 255, 100), 2, cv2.LINE_AA)
-            cv2.arrowedLine(img, center_pt, (int(center[0]), int((center[1] + line_y) / 2)), 
-                           (100, 255, 100), 2, tipLength=0.2)
-            
-            # 거리 정보
-            dist_to_target = abs(center[1] - target_y_px)
-            info_y = 120
-            cv2.putText(img, f"Current Y: {center[1]:.1f}px", (10, info_y), 
-                       0, 0.6, (255, 255, 255), 2)
-            cv2.putText(img, f"Target Y: {target_y_px:.1f}px", (10, info_y + 30), 
-                       0, 0.6, (0, 255, 255), 2)
-            cv2.putText(img, f"Distance: {dist_to_target:.1f}px", (10, info_y + 60), 
-                       0, 0.6, (100, 255, 100), 2)
-        
-        # PHASE 3: 회전 (135~140도)
-        elif current_phase == 3:
-            target_min = phase_controller.p3_min
-            target_max = phase_controller.p3_max
-            target_avg = (target_min + target_max) / 2
-            
-            arc_radius = 100
-            
-            # 현재 각도
-            curr_x = int(center[0] + arc_radius * math.cos(heading_angle))
-            curr_y = int(center[1] + arc_radius * math.sin(heading_angle))
-            cv2.arrowedLine(img, center_pt, (curr_x, curr_y), (255, 255, 255), 3, tipLength=0.3)
-            
-            # 목표 각도
-            target_rad = math.radians(target_avg)
-            target_x = int(center[0] + arc_radius * math.cos(target_rad))
-            target_y = int(center[1] + arc_radius * math.sin(target_rad))
-            cv2.arrowedLine(img, center_pt, (target_x, target_y), (255, 150, 0), 3, tipLength=0.3)
-            
-            # 회전 호
-            angle_diff = target_avg - current_yaw_deg
-            if abs(angle_diff) > 180:
-                angle_diff = angle_diff - 360 if angle_diff > 0 else angle_diff + 360
-            
-            cv2.ellipse(img, center_pt, (arc_radius, arc_radius), 0, 
-                       -current_yaw_deg, -target_avg, (255, 200, 100), 3)
-            
-            info_y = 120
-            cv2.putText(img, f"Current: {current_yaw_deg:.1f}deg", (10, info_y), 
-                       0, 0.6, (255, 255, 255), 2)
-            cv2.putText(img, f"Target: {target_avg:.1f}deg", (10, info_y + 30), 
-                       0, 0.6, (255, 150, 0), 2)
-            cv2.putText(img, f"To Rotate: {angle_diff:+.1f}deg", (10, info_y + 60), 
-                       0, 0.6, (255, 200, 100), 2)
-        
-        # PHASE 4: X축 정렬
-        elif current_phase == 4:
-            # 차량 중심선
-            car_cx = car_pos[0] + self.car_dim[0] / 2
-            
-            # X축 목표선 (세로선)
-            cv2.line(img, (int(car_cx), 0), (int(car_cx), self.map_h), (200, 100, 255), 2)
-            cv2.putText(img, "TARGET X", (int(car_cx) + 10, 30), 0, 0.5, (200, 100, 255), 2)
-            
-            # 현재 위치에서 목표까지 수평선
-            cv2.line(img, center_pt, (int(car_cx), int(center[1])), (150, 100, 255), 2, cv2.LINE_AA)
-            cv2.arrowedLine(img, center_pt, (int((center[0] + car_cx) / 2), int(center[1])), 
-                           (150, 100, 255), 2, tipLength=0.2)
-            
-            # 거리 정보
-            x_offset = abs(center[0] - car_cx)
-            info_y = 120
-            cv2.putText(img, f"Current X: {center[0]:.1f}px", (10, info_y), 
-                       0, 0.6, (255, 255, 255), 2)
-            cv2.putText(img, f"Target X: {car_cx:.1f}px", (10, info_y + 30), 
-                       0, 0.6, (200, 100, 255), 2)
-            cv2.putText(img, f"X Offset: {x_offset:.1f}px", (10, info_y + 60), 
-                       0, 0.6, (150, 100, 255), 2)
-        
-        # PHASE 5: 최종 정렬 (90~91도)
-        elif current_phase == 5:
-            target_min = phase_controller.p5_min
-            target_max = phase_controller.p5_max
-            target_avg = (target_min + target_max) / 2
-            
-            arc_radius = 100
-            
-            # 현재 각도
-            curr_x = int(center[0] + arc_radius * math.cos(heading_angle))
-            curr_y = int(center[1] + arc_radius * math.sin(heading_angle))
-            cv2.arrowedLine(img, center_pt, (curr_x, curr_y), (255, 255, 255), 3, tipLength=0.3)
-            
-            # 목표 각도
-            target_rad = math.radians(target_avg)
-            target_x = int(center[0] + arc_radius * math.cos(target_rad))
-            target_y = int(center[1] + arc_radius * math.sin(target_rad))
-            cv2.arrowedLine(img, center_pt, (target_x, target_y), (255, 100, 200), 3, tipLength=0.3)
-            
-            # 회전 호
-            angle_diff = target_avg - current_yaw_deg
-            if abs(angle_diff) > 180:
-                angle_diff = angle_diff - 360 if angle_diff > 0 else angle_diff + 360
-            
-            cv2.ellipse(img, center_pt, (arc_radius, arc_radius), 0, 
-                       -current_yaw_deg, -target_avg, (255, 150, 200), 3)
-            
-            info_y = 120
-            cv2.putText(img, f"Current: {current_yaw_deg:.1f}deg", (10, info_y), 
-                       0, 0.6, (255, 255, 255), 2)
-            cv2.putText(img, f"Target: {target_avg:.1f}deg", (10, info_y + 30), 
-                       0, 0.6, (255, 100, 200), 2)
-            cv2.putText(img, f"To Rotate: {angle_diff:+.1f}deg", (10, info_y + 60), 
-                       0, 0.6, (255, 150, 200), 2)
-        
-        # PHASE 6: 진입 (초음파 거리 표시)
-        elif current_phase == 6:
-            info_y = 120
-            cv2.putText(img, "Entering parking spot...", (10, info_y), 
-                       0, 0.7, (100, 255, 100), 2)
-            
-            # 진입 방향 화살표
-            arrow_len = 80
-            arrow_x = int(center[0] + arrow_len * math.cos(heading_angle))
-            arrow_y = int(center[1] + arrow_len * math.sin(heading_angle))
-            cv2.arrowedLine(img, center_pt, (arrow_x, arrow_y), (100, 255, 100), 4, tipLength=0.3)
+            # 4. 출차 P5: 최종 탈출
+            elif current_phase == 5:
+                draw_info_text([("Moving to Exit Goal...", (100, 255, 100))])
+                if exit_goal:
+                    eg = (int(exit_goal[0]), int(exit_goal[1]))
+                    cv2.line(img, center_pt, eg, (255, 150, 150), 1, cv2.LINE_AA)
+                    cv2.arrowedLine(img, center_pt, eg, (100, 255, 100), 2, tipLength=0.2)

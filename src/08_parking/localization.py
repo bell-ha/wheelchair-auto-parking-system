@@ -279,6 +279,6 @@ class PoseEstimator:
 
         return self.marker_pos, self.heading_angle, self.is_initialized
 
-    def get_center_position(self, wc_l, map_scale):
-        """휠체어 중심 위치 계산 (보정된 center 반환)"""
+    def get_center_position(self):
+        """휠체어 중심 위치 반환 (보정된 center). Removed unused args."""
         return self.marker_pos
