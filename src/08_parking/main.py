@@ -63,7 +63,7 @@ D = np.array([-0.18495647, 0.02541005, -0.01068433, 0.00321714], dtype=np.float3
 class CompactTracker:
     def __init__(self):
         # 맵 설정
-        self.map_w, self.map_h = 1000, 1000
+        self.map_w, self.map_h = 1500, 1500
         self.grid_w, self.grid_h = 600, 720
         self.off_x, self.off_y = 200, 150
         self.map_scale = 1.0
@@ -117,7 +117,7 @@ class CompactTracker:
         cv2.resizeWindow(self.win_name, 600, 600)
         
         # 시나리오 목표 위치 (픽셀 단위) - 주차/출차/A* 모두 공유
-        self.parking_goal = (car_cx, car_rear_y + 70)
+        self.parking_goal = (car_cx, car_rear_y + 100)
         self.exit_goal = (car_cx - 200, car_cy)
         
         # 동적 장애물
@@ -149,8 +149,8 @@ class CompactTracker:
         self.cmd_sender = UdpCommandSender(SERVER_IP, SERVER_PORT, SEND_HZ)
         
         # 영상
-        self.cap0 = cv2.VideoCapture("/home/fcel25/sjstudy/wheelchair-auto-parking-system/src/command/1_rear.mp4")
-        self.cap1 = cv2.VideoCapture("/home/fcel25/sjstudy/wheelchair-auto-parking-system/src/command/1_left.mp4")
+        self.cap0 = cv2.VideoCapture(0)
+        self.cap1 = cv2.VideoCapture(1)
         self.total_frames = int(min(self.cap0.get(cv2.CAP_PROP_FRAME_COUNT), 
                                    self.cap1.get(cv2.CAP_PROP_FRAME_COUNT)))
         cv2.setMouseCallback(self.win_name, self.mouse_callback)
