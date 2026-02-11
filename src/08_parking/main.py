@@ -9,18 +9,8 @@ from planner import PathPlanner
 from tracker import PathTracker
 from localization import PoseEstimator
 from visualizer import Visualizer
-from phase import PhaseController
-
-# ===== 사용자 설정 (control.py 참고) =====
-SERVER_IP = "172.25.244.144"   # 리눅스 PC IP로 바꾸기
-SERVER_PORT = 25001
-
-SEND_HZ = 30                   # 20~50 추천
-# 속도 (원하면 여기만 조절)
-FWD_MM_S = 200
-REV_MM_S = -200
-YAW_MRAD_S = 300               # 0.300 rad/s
-# =======================
+from phase import UnifiedPhaseController  # 통합 컨트롤러
+from control import SERVER_IP, SERVER_PORT, SEND_HZ, FWD_MM_S, REV_MM_S, YAW_MRAD_S
 
 
 class UdpCommandSender:
@@ -79,7 +69,7 @@ class CompactTracker:
         self.map_scale = 1.0
         self.wc_w, self.wc_l = 55.0, 66.0
         
-        # 마커 및 카메라 (07_map_calibration 값 반영)
+        # 마커 및 카메라
         self.marker_size_m, self.marker_h_cm = 0.25, 70.0
         self.car_zone = ((200 + self.off_x, 180 + self.off_y),
                          (400 + self.off_x, 540 + self.off_y))
@@ -121,29 +111,21 @@ class CompactTracker:
         self.car_x, self.car_y = self.car_zone[0]
         car_rear_y = self.car_y + self.car_dim[1] + 150
 
-        # CompactTracker.__init__ 내부
+        # 윈도우 설정
         self.win_name = "Compact Tracker"
-        cv2.namedWindow(self.win_name, cv2.WINDOW_NORMAL) # WINDOW_NORMAL로 변경
-        cv2.resizeWindow(self.win_name, 600, 600)        # 초기 창 크기를 600x600으로 설정
+        cv2.namedWindow(self.win_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(self.win_name, 600, 600)
         
-        # 시나리오 목표 위치 (픽셀 단위)
-        self.parking_goal = (car_cx, car_rear_y + 70)  # 최종 주차 위치
+        # 시나리오 목표 위치 (픽셀 단위) - 주차/출차/A* 모두 공유
+        self.parking_goal = (car_cx, car_rear_y + 70)
+        self.exit_goal = (car_cx - 200, car_cy)
         
         # 동적 장애물
         self.dynamic_obstacles = []
-        
-        # 초음파 거리 (cm)
+        # 초음파 거리
         self.sonar_dist_cm = 999.0
         
-        # === Phase Controller 초기화 ===
-        # 픽셀 좌표를 미터로 변환 (ROS2 코드와 매칭)
-          # Phase 2 목표 Y 위치
-        # 현재: 픽셀 직접 사용
-        target_y_offset = 300  # 차량 후방으로부터 250픽셀
-        self.target_y = self.car_y + self.car_dim[1] + target_y_offset
-        goal_pos_meters = [0.0, self.target_y]
-        
-        self.phase_controller = PhaseController(goal_pos_meters, self.car_dim)
+        self.phase_controller = UnifiedPhaseController(self.parking_goal, self.exit_goal, self.car_dim)
         
         # 모듈 초기화
         self.planner = PathPlanner(self.map_w, self.map_h, self.wc_w, self.map_scale)
@@ -152,7 +134,8 @@ class CompactTracker:
         self.tracker = PathTracker(self.wc_l, self.map_scale)
         self.tracker.set_planner(self.planner)
         self.tracker.set_obstacle_checker(self.is_obstacle)
-        self.tracker.set_phase_controller(self.phase_controller)  # Phase Controller 연결
+        self.tracker.set_phase_controller(self.phase_controller)
+        
         
         self.estimator = PoseEstimator(
             K, D, self.cams, self.marker_size_m, self.marker_h_cm,
@@ -166,17 +149,13 @@ class CompactTracker:
         self.cmd_sender = UdpCommandSender(SERVER_IP, SERVER_PORT, SEND_HZ)
         
         # 영상
-        self.cap0 = cv2.VideoCapture(0)
-        self.cap1 = cv2.VideoCapture(1)
+        self.cap0 = cv2.VideoCapture("/home/fcel25/sjstudy/wheelchair-auto-parking-system/src/command/1_rear.mp4")
+        self.cap1 = cv2.VideoCapture("/home/fcel25/sjstudy/wheelchair-auto-parking-system/src/command/1_left.mp4")
         self.total_frames = int(min(self.cap0.get(cv2.CAP_PROP_FRAME_COUNT), 
                                    self.cap1.get(cv2.CAP_PROP_FRAME_COUNT)))
-        
-        self.win_name = "Compact Tracker"
-        cv2.namedWindow(self.win_name)
         cv2.setMouseCallback(self.win_name, self.mouse_callback)
-        cv2.createTrackbar("Frame", self.win_name, 278, self.total_frames-1, self.on_frame)
-        cv2.createTrackbar("Mode", self.win_name, 0, 1, self.on_mode_toggle)  # 0=Phase(default), 1=A*
-        self.on_frame(278)
+        cv2.createTrackbar("Frame", self.win_name, 0, self.total_frames-1, self.on_frame)
+        cv2.createTrackbar("Mode", self.win_name, 0, 3, self.on_mode_toggle) # 0~3으로 확장
     
     def mouse_callback(self, event, x, y, flags, param):
         """마우스 클릭으로 장애물 추가/제거"""
@@ -193,26 +172,29 @@ class CompactTracker:
                     if self.estimator.is_initialized:
                         self.update_path()
                     break
-    
+
     def on_frame(self, v):
         self.cap0.set(cv2.CAP_PROP_POS_FRAMES, v)
         self.cap1.set(cv2.CAP_PROP_POS_FRAMES, v)
         _, self.f0 = self.cap0.read()
         _, self.f1 = self.cap1.read()
-    
+
     def on_mode_toggle(self, v):
-        """모드 토글 - 0=Phase(default), 1=A*"""
-        if v == 0:
-            # Phase 모드로 전환
+        if v == 0: # Parking Phase
+            self.phase_controller.set_mode(is_parking=True)
             self.tracker.use_phase_mode = True
-            self.phase_controller.reset()
-            self.tracker.clear_path()
-            print("✅ Phase 모드로 전환")
-        else:
-            # A* 모드로 전환
+        elif v == 1: # Exit Phase
+            self.phase_controller.set_mode(is_parking=False)
+            self.tracker.use_phase_mode = True
+        elif v == 2: # Parking A*
+            self.phase_controller.set_mode(is_parking=True)
             self.tracker.use_phase_mode = False
-            self.tracker.clear_path()
-            print("🔄 A* 모드로 전환")
+        elif v == 3: # Exit A*
+            self.phase_controller.set_mode(is_parking=False)
+            self.tracker.use_phase_mode = False
+        
+        self.tracker.clear_path()
+        print(f"Mode Changed to: {v}")
     
     def is_obstacle(self, px, py):
         """장애물 검사"""
@@ -230,184 +212,164 @@ class CompactTracker:
                 return True
         return False
     
-    def pixel_to_meters(self, px, py):
-        """픽셀 좌표를 미터 좌표로 변환 (차량 중심 기준)"""
-        # 차량 중심점 계산
-        car_cx = self.car_x + self.car_dim[0] / 2
-        car_cy = self.car_y + self.car_dim[1] / 2
-        
-        # 상대 좌표 (픽셀)
-        dx_px = px - car_cx
-        dy_px = py - car_cy
-        
-        # 미터로 변환 (map_scale 고려)
-        # 실제 거리 = 픽셀 거리 / map_scale / 스케일 팩터
-        # 예: 1미터 = 50픽셀이라고 가정
-        PIXEL_PER_METER = 50.0 / self.map_scale
-        
-        x_m = dx_px / PIXEL_PER_METER
-        y_m = -dy_px / PIXEL_PER_METER  # Y축 반전 (이미지 좌표계 → 실제 좌표계)
-        
-        return [x_m, y_m]
-    
     def update_phase_from_detection(self, marker_id, yaw_deg, cam_side):
-        """
-        마커 감지 정보로 Phase Controller 업데이트 (픽셀 직접 사용)
-        """
+        """마커 감지 정보로 통합 Phase Controller 업데이트 (안전 장치 추가)"""
         if not self.tracker.use_phase_mode:
             return
         
-        # 카메라 매핑 (cam0=back, cam1=left)
-        cam_name = 'back' if cam_side == 'cam0' else 'left'
+        # 카메라 이름 매핑 (None일 경우 처리)
+        cam_name = None
+        if cam_side == 'cam0': cam_name = 'back'
+        elif cam_side == 'cam1': cam_name = 'left'
         
-        # [수정] 미터 변환 없이 픽셀 좌표를 직접 전달
+        # 마커 좌표가 있을 때와 없을 때 모두 컨트롤러에 신호를 줌
+        # (출차 시에는 마커 위치보다 yaw_deg 정렬이 중요하기 때문)
+        rel_pos = None
         if self.estimator.marker_pos is not None:
-            # 변수 이름(rel_pos_meters)은 유지하되 데이터는 픽셀 값
-            rel_pos_meters = [self.estimator.marker_pos[0], self.estimator.marker_pos[1]]
-            
-            # Phase 완료 조건 체크
-            self.phase_controller.check_phase_completion(
-                rel_pos_meters, yaw_deg, marker_id, cam_name
-            )
+            rel_pos = [self.estimator.marker_pos[0], self.estimator.marker_pos[1]]
+        
+        # 컨트롤러 호출
+        self.phase_controller.check_phase_completion(
+            rel_pos, yaw_deg, marker_id, cam_name
+        )
 
     def update_path(self):
-        """경로 업데이트 (픽셀 직접 사용)"""
+        """경로 업데이트 (A* goal은 phase_controller와 공유)"""
         if not self.estimator.is_initialized:
             return
         
-        # [수정] 미터 변환 로직 제거, 픽셀 좌표 사용
-        rel_pos_meters = None
-        if self.estimator.marker_pos is not None:
-            rel_pos_meters = [self.estimator.marker_pos[0], self.estimator.marker_pos[1]]
+        # A* 모드에서도 phase_controller의 goal 사용
+        astar_goal = self.phase_controller.get_goal_pos()
         
-        # PathTracker의 update_path 호출
         self.tracker.update_path(
             self.estimator.marker_pos,
             self.estimator.heading_angle,
-            self.parking_goal,
+            astar_goal,  # phase_controller와 동일한 goal
             self.sonar_dist_cm
         )
     
-
     def send(self, action_cmd):
-        """명령어 전송 (control.py 프로토콜 기반)"""
+        """명령어 전송"""
         print(f"➡️ 명령어 전송: {action_cmd}")
         self.cmd_sender.send_action(action_cmd)
 
     def run(self):
         """메인 루프"""
         play = True
-        detected_marker_id = None
-        detected_cam_side = None
         
         while True:
             if play:
                 ret0, self.f0 = self.cap0.read()
                 ret1, self.f1 = self.cap1.read()
                 if not ret0 or not ret1:
-                    self.on_frame(0)
+                    # 영상 끝까지 도달 시 첫 프레임으로 되돌리기 (선택 사항)
+                    self.cap0.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    self.cap1.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
-                cv2.setTrackbarPos("Frame", self.win_name, 
-                                  int(self.cap0.get(cv2.CAP_PROP_POS_FRAMES)))
             
-            # 맵 생성
+            # 1. 맵 생성 및 차량/장애물 기본 시각화
             img = self.visualizer.create_map()
             self.visualizer.draw_car(img)
             self.visualizer.draw_obstacles(img, self.dynamic_obstacles)
             
-            # 주차 목표 그리기
-            cv2.circle(img, (int(self.parking_goal[0]), int(self.parking_goal[1])), 12, (0, 255, 0), -1)
-            cv2.putText(img, "GOAL", (int(self.parking_goal[0])-20, int(self.parking_goal[1])-20), 
-                       0, 0.5, (0, 255, 0), 2)
+            # 2. 현재 모드에 따른 목표 지점 표시 (A* 목표 포함)
+            if self.phase_controller.is_parking:
+                # 주차 모드일 때 녹색 목표 표시
+                self.visualizer.draw_parking_goal(img, self.parking_goal)
+            else:
+                # 출차 모드일 때 주황색 목표 표시
+                self.visualizer.draw_exit_goal(img, self.exit_goal)
             
-            # 모니터 프레임
+            # 모니터 프레임 복사
             mon0 = self.f0.copy() if self.f0 is not None else np.zeros((360,640,3), np.uint8)
             mon1 = self.f1.copy() if self.f1 is not None else np.zeros((360,640,3), np.uint8)
 
-            # 포즈 추정 (마커 ID와 카메라 정보 추출)
+            # 3. 포즈 추정 및 휠체어 상태 업데이트
             frames = {'cam0': self.f0, 'cam1': self.f1}
             marker_pos, heading_angle, is_init = self.estimator.detect_and_estimate(frames)
             
-            # 현재 액션 초기화
             current_action = "NO PATH"
-            linear_vel, angular_vel = 0.0, 0.0
             
+            # main.py의 run() 메서드 루프 내부
             if is_init:
-                # --- [핵심 추가] 후방 카메라 마커 가시성 업데이트 ---
-                # cam0(후방)에서 검출된 리스트가 비어있지 않으면(0번이든 1번이든) True
-                back_cam_list = self.estimator.last_det_by_cam.get('cam0', [])
-                any_marker_back = len(back_cam_list) > 0
-                self.phase_controller.update_marker_visibility(any_marker_back)
-                # ------------------------------------------------
-
                 yaw_deg = math.degrees(heading_angle)
-                self.update_phase_from_detection(1, yaw_deg, 'cam1')
-                self.update_phase_from_detection(0, yaw_deg, 'cam0')
-                
-                center = self.estimator.get_center_position(self.wc_l, self.map_scale)
-                self.update_path()
-                
-                # --- 제어 및 액션 계산 시작 ---
-                if self.tracker.use_phase_mode and self.phase_controller:
-                    # 1. 픽셀 좌표 전달
-                    rel_pos_pixels = [marker_pos[0], marker_pos[1]]
+
+                # [핵심 수정] 모드에 따라 업데이트 로직을 완전히 분리
+                if self.phase_controller.is_parking:
+                    # 주차 전용: 후방 마커 가시성 체크
+                    back_cam_list = self.estimator.last_det_by_cam.get('cam0', [])
+                    self.phase_controller.update_marker_visibility(len(back_cam_list) > 0)
                     
-                    # 2. PhaseController로부터 직접 '고정 명령어'와 '상태 메시지'를 받음
-                    # 이제 리턴값이 (action_cmd, phase_text) 두 개입니다.
+                    # 주차 전용: 마커 1(진입), 0(최종) 업데이트
+                    self.update_phase_from_detection(1, yaw_deg, 'cam1')
+                    self.update_phase_from_detection(0, yaw_deg, 'cam0')
+                else:
+                    # 출차 전용: 주차용 마커 ID 대신 현재 감지된 정보를 유연하게 전달
+                    # 출차 시에는 특정 마커 ID에 묶이지 않도록 None 혹은 범용 업데이트 호출
+                    self.update_phase_from_detection(None, yaw_deg, None)
+                
+                center = self.estimator.get_center_position()
+                self.update_path() # 내부적으로 is_parking에 따라 목표 분리
+                
+                # --- 제어 명령 및 시각화 가이드 계산 ---
+                if self.tracker.use_phase_mode:
+                    # Phase 모드 제어
+                    rel_pos_pixels = [marker_pos[0], marker_pos[1]]
                     current_action, phase_mode_text = self.phase_controller.compute_control(
                         rel_pos_pixels, self.sonar_dist_cm
                     )
+                    self.send(current_action)
                     
-                    # [추가] 실제 하드웨어나 서버로 명령을 발행해야 한다면 여기서 수행합니다.
-                    self.send(current_action) 
-
-
-                    # 3. 시각화 호출 (전달받은 target_y 사용)
+                    # 구체적인 Phase 가이드 시각화 (주차/출차 통합 가이드 호출)
+                    # exit_goal 인자를 추가하여 출차 시에도 상세 가이드 표시 가능
                     self.visualizer.draw_phase_guidance(
-                        img, 
-                        marker_pos,
-                        heading_angle, 
+                        img, marker_pos, heading_angle, 
                         self.phase_controller.get_current_phase(),
                         self.phase_controller, 
                         (self.car_x, self.car_y), 
-                        self.target_y
+                        self.parking_goal,
+                        exit_goal=self.exit_goal,
+                        phase_mode_text=phase_mode_text  # <-- 추가
                     )
-                    
-                    # 4. 화면에 현재 액션(FORWARD, STOP 등) 표시
-                    self.visualizer.draw_action_command(img, current_action)
                 else:
-                    # A* 제어 로직 수행
+                    # A* 모드 제어 (현재 선택된 시나리오 목표를 추종)
                     linear_vel, angular_vel, current_action = self.tracker.compute_action(
                         center, heading_angle
                     )
                     self.send(current_action)
+                    
+                    # A* 모드 알림 시각화
+                    mode_name = "A* (PARKING)" if self.phase_controller.is_parking else "A* (EXITING)"
+                    cv2.putText(img, mode_name, (10, 50), 0, 0.7, (0, 100, 255), 2)
                 
-                # 휠체어 및 경로 렌더링
+                # 4. 경로 및 휠체어 렌더링
                 path = self.tracker.get_path()
-                if not self.tracker.use_phase_mode and len(path) >= 2:
+                # A* 모드 혹은 Phase 모드에서 경로가 존재할 때만 드로잉
+                if len(path) >= 2:
                     self.visualizer.draw_path(img, path, center, heading_angle)
 
                 self.visualizer.draw_wheelchair(img, center, heading_angle)
+                
+                # 현재 실행 중인 최종 액션(FORWARD, STOP 등) 표시
                 self.visualizer.draw_action_command(img, current_action)
             
-            # 도움말
+            # 도움말 및 상태표시
             self.visualizer.draw_help_text(img)
-            cv2.putText(img, "Mode Trackbar: 0=Phase(default), 1=A* | 'r'=Reset | 'c'=Clear Obstacles", 
+            cv2.putText(img, "Mode: 0=Parking, 1=Exit, 2=A* | 'r'=Reset | 'c'=Clear", 
                        (10, self.map_h - 10), 0, 0.4, (150, 150, 150), 1)
             
-            # [수정] 출력용 이미지 리사이즈 (0.6배 예시)
+            # 5. 화면 출력 처리 (리사이즈)
             display_scale = 0.6
             img_resized = cv2.resize(img, (int(self.map_w * display_scale), int(self.map_h * display_scale)))
-            
-            # [수정] 모니터(카메라 뷰) 크기도 너무 크다면 함께 조절
             mon_resized = np.hstack([
                 cv2.resize(mon1, (400, 225)), 
                 cv2.resize(mon0, (400, 225))
             ])
             
-            cv2.imshow(self.win_name, img_resized) # 리사이즈된 이미지 출력
-            cv2.imshow("Monitor", mon_resized)    # 리사이즈된 모니터 출력
+            cv2.imshow(self.win_name, img_resized)
+            cv2.imshow("Monitor", mon_resized)
             
+            # 키 입력 처리
             key = cv2.waitKey(30) & 0xFF
             if key == ord(' '):
                 play = not play
@@ -418,12 +380,11 @@ class CompactTracker:
                 self.dynamic_obstacles.clear()
                 self.update_path()
             elif key == ord('r'):
-                # Phase Controller 리셋
                 self.phase_controller.reset()
                 self.tracker.clear_path()
                 self.tracker.last_action = "STOP"
-                self.tracker.stop_count = 0
-                print("🔄 Phase Controller 및 Tracker 리셋")
+                self.tracker.wait_counter = 0
+                print("🔄 Controller 리셋")
         
         self.cap0.release()
         self.cap1.release()

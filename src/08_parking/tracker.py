@@ -17,8 +17,8 @@ class PathTracker:
         
         # 액션 추적 변수
         self.last_action = "STOP"
-        self.stop_count = 0
-        self.min_stop_frames = 5  # 명령 전환 전 정지할 프레임 수 (약 0.15~0.2초)
+        self.wait_counter = 0
+        self.min_wait_frames = 15  # 명령 전환 전 정지할 프레임 수 (약 0.15~0.2초)
     
     def set_planner(self, planner):
         """경로 계획기 설정"""
@@ -154,23 +154,23 @@ class PathTracker:
         """현재 경로 반환"""
         return self.path
     
+    def _trigger_wait(self, frames=None):
+        """명령 전환 시 대기를 발생시키는 내부 함수 (PhaseController의 방식)"""
+        self.wait_counter = frames if frames is not None else self.min_wait_frames
+        self.last_action = "STOP"
+
     def compute_action(self, center, current_yaw, look_ahead_dist=40.0):
-        """
-        경로 추적을 위한 제어 명령 계산
-        
-        Args:
-            center: 현재 위치 [x, y]
-            current_yaw: 현재 방향각 (라디안)
-            look_ahead_dist: Look-ahead 거리 (픽셀)
-        
-        Returns:
-            (linear_vel, angular_vel, action_name) 튜플
-        """
+        """제어 명령 계산"""
+        # 1. 대기 카운터가 동작 중이면 즉시 STOP 반환
+        if self.wait_counter > 0:
+            self.wait_counter -= 1
+            return 0.0, 0.0, "STOP"
+
         # A* 모드가 아니거나 경로가 없으면 정지
         if self.use_phase_mode or not self.path or len(self.path) < 1:
             return 0.0, 0.0, "NO PATH"
         
-        # 1. 원시 타겟 방향 계산
+        # 2. 타겟 방향 및 이상적 액션 판별
         target_pt = self.path[-1]
         for p in self.path:
             if math.dist(center, p) >= look_ahead_dist:
@@ -182,54 +182,32 @@ class PathTracker:
         yaw_error = math.atan2(math.sin(target_yaw - current_yaw), 
                                math.cos(target_yaw - current_yaw))
 
-        # 2. 이번 프레임에서 내리고 싶은 '이상적인' 명령 판별
         dead_zone = math.radians(15)
         reverse_zone = math.radians(100)
-        if abs(yaw_error) > reverse_zone:
-            ideal_action = "BACKWARD"
-        elif abs(yaw_error) < dead_zone:
-            ideal_action = "FORWARD"
-        elif yaw_error > 0:
-            ideal_action = "TURN LEFT"
-        else:
-            ideal_action = "TURN RIGHT"
+        
+        if abs(yaw_error) > reverse_zone: ideal_action = "BACKWARD"
+        elif abs(yaw_error) < dead_zone: ideal_action = "FORWARD"
+        elif yaw_error > 0: ideal_action = "TURN LEFT"
+        else: ideal_action = "TURN RIGHT"
 
-        # 3. [핵심] 명령 전환 시 강제 정지 로직
-        if ideal_action != self.last_action and self.last_action != "STOP":
-            self.stop_count = self.min_stop_frames
-            self.last_action = "STOP"
-            return 0.0, 0.0, "STOP"
+        # 3. [핵심] 액션이 변경될 때만 대기 발생 (Trigger Wait)
+        # STOP에서 다른 액션으로 갈 때, 혹은 액션끼리 바뀔 때
+        if ideal_action != self.last_action:
+            # 이전 액션이 STOP이 아니었을 때만 대기 (연속적인 STOP 방지)
+            if self.last_action != "STOP":
+                self._trigger_wait()
+                return 0.0, 0.0, "STOP"
 
-        # 정지 카운트가 남아있는 경우 (정지 유지)
-        if self.stop_count > 0:
-            self.stop_count -= 1
-            return 0.0, 0.0, "STOP (TRANSITION)"
-
-        # 4. 최종 명령 확정
+        # 4. 최종 명령 확정 및 상태 저장
         self.last_action = ideal_action
-        if ideal_action == "FORWARD":
-            return 0.2, 0.0, "FORWARD"
-        elif ideal_action == "TURN LEFT":
-            return 0.0, 0.15, "TURN LEFT"
-        elif ideal_action == "TURN RIGHT":
-            return 0.0, -0.15, "TURN RIGHT"
-        elif ideal_action == "BACKWARD":
-            return -0.2, 0.0, "BACKWARD"
         
-        return 0.0, 0.0, "STOP"
-    
-    # tracker.py 내부에 추가
-    def compute_action_from_vel(self, v, w):
-        """발행된 속도를 기반으로 5대 명령 문자열 반환"""
-        if abs(v) < 0.01 and abs(w) < 0.01:
-            return 0.0, 0.0, "STOP"
+        # 액션 매핑
+        actions = {
+            "FORWARD": (0.2, 0.0),
+            "BACKWARD": (-0.2, 0.0),
+            "TURN LEFT": (0.0, 0.15),
+            "TURN RIGHT": (0.0, -0.15)
+        }
         
-        if abs(w) > 0.01:
-            return 0.0, w, "TURN LEFT" if w > 0 else "TURN RIGHT"
-        
-        if v > 0:
-            return v, 0.0, "FORWARD"
-        elif v < 0:
-            return v, 0.0, "BACKWARD"
-            
-        return 0.0, 0.0, "STOP"
+        v, w = actions.get(ideal_action, (0.0, 0.0))
+        return v, w, ideal_action
