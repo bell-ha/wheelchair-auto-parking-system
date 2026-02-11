@@ -73,7 +73,8 @@ class CompactTracker:
         self.marker_size_m, self.marker_h_cm = 0.25, 70.0
         self.car_zone = ((200 + self.off_x, 180 + self.off_y),
                          (400 + self.off_x, 540 + self.off_y))
-
+        self.ramp_zone = ((200 + self.off_x, 540 + self.off_y),
+                         (400 + self.off_x, 720 + self.off_y))
         car_cx = (self.car_zone[0][0] + self.car_zone[1][0]) / 2
         car_cy = (self.car_zone[0][1] + self.car_zone[1][1]) / 2
 
@@ -143,7 +144,7 @@ class CompactTracker:
         )
         
         self.visualizer = Visualizer(self.map_w, self.map_h, self.car_dim, 
-                                     (self.car_x, self.car_y), self.wc_w, self.wc_l, self.map_scale)
+                                     (self.car_x, self.car_y), self.wc_w, self.wc_l, self.map_scale, self.ramp_zone)
 
         # 명령 전송기
         self.cmd_sender = UdpCommandSender(SERVER_IP, SERVER_PORT, SEND_HZ)
@@ -203,6 +204,12 @@ class CompactTracker:
         # 1. 차량 장애물
         if (self.car_x - safe_margin) <= px <= (self.car_x + self.car_dim[0] + safe_margin) and \
            (self.car_y - safe_margin) <= py <= (self.car_y + self.car_dim[1] + safe_margin):
+            return True
+        
+        # 반대로 경사로 자체가 휠체어가 올라가면 안 되는 곳이라면 아래와 같이 추가합니다.
+        r_pt1, r_pt2 = self.ramp_zone[0], self.ramp_zone[1]
+        if (r_pt1[0] - safe_margin) <= px <= (r_pt2[0] + safe_margin) and \
+           (r_pt1[1] - safe_margin) <= py <= (r_pt2[1] + safe_margin):
             return True
             
         # 2. 동적 장애물
@@ -270,6 +277,7 @@ class CompactTracker:
             # 1. 맵 생성 및 차량/장애물 기본 시각화
             img = self.visualizer.create_map()
             self.visualizer.draw_car(img)
+            self.visualizer.draw_ramp(img)
             self.visualizer.draw_obstacles(img, self.dynamic_obstacles)
             
             # 2. 현재 모드에 따른 목표 지점 표시 (A* 목표 포함)

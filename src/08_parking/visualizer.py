@@ -6,7 +6,7 @@ import math
 class Visualizer:
     """맵 및 경로 시각화 모듈"""
     
-    def __init__(self, map_w, map_h, car_dim, car_pos, wc_w, wc_l, map_scale):
+    def __init__(self, map_w, map_h, car_dim, car_pos, wc_w, wc_l, map_scale, ramp_zone):
         self.map_w = map_w
         self.map_h = map_h
         self.car_dim = car_dim
@@ -14,6 +14,7 @@ class Visualizer:
         self.wc_w = wc_w
         self.wc_l = wc_l
         self.map_scale = map_scale
+        self.ramp_zone = ramp_zone
     
     def create_map(self):
         """빈 맵 이미지 생성"""
@@ -36,6 +37,21 @@ class Visualizer:
             (35, 35, 45), 
             -1
         )
+    def draw_ramp(self, img):
+        """경사로(Ramp Zone) 시각화"""
+        # ramp_zone: ((x1, y1), (x2, y2))
+        pt1 = self.ramp_zone[0]
+        pt2 = self.ramp_zone[1]
+        
+        # 1. 배경 채우기 (연한 회색)
+        cv2.rectangle(img, (int(pt1[0]), int(pt1[1])), (int(pt2[0]), int(pt2[1])), (180, 180, 180), -1)
+        
+        # 2. 테두리 그리기 (진한 회색)
+        cv2.rectangle(img, (int(pt1[0]), int(pt1[1])), (int(pt2[0]), int(pt2[1])), (100, 100, 100), 2)
+        
+        # 3. 경사로 텍스트 추가 (선택 사항)
+        cv2.putText(img, "RAMP", (int(pt1[0] + 10), int(pt1[1] + 30)), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (50, 50, 50), 2)
     
     def draw_obstacles(self, img, obstacles):
         """동적 장애물 그리기"""
