@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "version": 1,
+  "parent_version": 0,
+  "made_from_raw_version": 0,
+  "created_at": 1770872888.401982,
+  "dist_gain_fixed": 0.9,
+  "model": {
+    "type": "affine_distance",
+    "A0": [
+      [
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0
+      ]
+    ],
+    "A1": [
+      [
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0
+      ]
+    ],
+    "b0": [
+      0.0,
+      0.0
+    ],
+    "b1": [
+      0.0,
+      0.0
+    ],
+    "yaw_a": 0.0,
+    "yaw_k": 0.0
+  },
+  "fit_stats": {},
+  "params_used": {}
+}

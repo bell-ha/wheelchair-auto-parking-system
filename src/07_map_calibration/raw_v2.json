@@ -1,0 +1,303 @@
+{
+  "schema_version": 1,
+  "calib_version": 2,
+  "updated_at": 1770873192.046911,
+  "samples": [
+    {
+      "type": "center",
+      "t": 1770873169.9392672,
+      "clicked_xy": [
+        500.0,
+        897.0
+      ],
+      "raw_center": [
+        493.22064208984375,
+        870.078125
+      ],
+      "corr_center": [
+        502.1715087890625,
+        892.2510375976562
+      ],
+      "raw_heading": 1.5341316065893498,
+      "corr_heading": 1.5341316065893498,
+      "fused_d": 1.7492761629846278,
+      "cam_obs": {
+        "rear": {
+          "seen": true,
+          "active": true,
+          "held": false,
+          "ground_m": 1.7492761629846278,
+          "quality": 0.55,
+          "stability": 1.0
+        },
+        "left": {
+          "seen": false,
+          "active": false,
+          "held": false,
+          "ground_m": null,
+          "quality": null,
+          "stability": 0.3
+        }
+      }
+    },
+    {
+      "type": "center",
+      "t": 1770873173.434248,
+      "clicked_xy": [
+        500.0,
+        897.0
+      ],
+      "raw_center": [
+        486.90771484375,
+        874.6302490234375
+      ],
+      "corr_center": [
+        500.91473388671875,
+        895.9637451171875
+      ],
+      "raw_heading": 2.604085161393866,
+      "corr_heading": 2.604085161393866,
+      "fused_d": 1.9197082451315401,
+      "cam_obs": {
+        "rear": {
+          "seen": true,
+          "active": true,
+          "held": false,
+          "ground_m": 1.9197082451315401,
+          "quality": 0.55,
+          "stability": 1.0
+        },
+        "left": {
+          "seen": false,
+          "active": false,
+          "held": false,
+          "ground_m": null,
+          "quality": null,
+          "stability": 0.3
+        }
+      }
+    },
+    {
+      "type": "center",
+      "t": 1770873178.2534668,
+      "clicked_xy": [
+        500.0,
+        897.0
+      ],
+      "raw_center": [
+        522.0595703125,
+        880.8616943359375
+      ],
+      "corr_center": [
+        548.5601196289062,
+        900.0127563476562
+      ],
+      "raw_heading": -2.9526426766780185,
+      "corr_heading": -2.9526426766780185,
+      "fused_d": 2.070950634474478,
+      "cam_obs": {
+        "rear": {
+          "seen": true,
+          "active": true,
+          "held": false,
+          "ground_m": 2.070950634474478,
+          "quality": 1.0,
+          "stability": 1.0
+        },
+        "left": {
+          "seen": false,
+          "active": false,
+          "held": false,
+          "ground_m": null,
+          "quality": null,
+          "stability": 0.3
+        }
+      }
+    },
+    {
+      "type": "center",
+      "t": 1770873180.596454,
+      "clicked_xy": [
+        500.0,
+        897.0
+      ],
+      "raw_center": [
+        522.1287841796875,
+        881.1060791015625
+      ],
+      "corr_center": [
+        548.8370361328125,
+        900.222900390625
+      ],
+      "raw_heading": -2.9537949934223753,
+      "corr_heading": -2.9537949934223753,
+      "fused_d": 2.07610791866105,
+      "cam_obs": {
+        "rear": {
+          "seen": true,
+          "active": true,
+          "held": false,
+          "ground_m": 2.07610791866105,
+          "quality": 1.0,
+          "stability": 1.0
+        },
+        "left": {
+          "seen": false,
+          "active": false,
+          "held": false,
+          "ground_m": null,
+          "quality": null,
+          "stability": 0.3
+        }
+      }
+    },
+    {
+      "type": "center",
+      "t": 1770873182.608032,
+      "clicked_xy": [
+        500.0,
+        897.0
+      ],
+      "raw_center": [
+        522.128662109375,
+        881.1033935546875
+      ],
+      "corr_center": [
+        548.6212158203125,
+        900.2626953125
+      ],
+      "raw_heading": -2.9541222771418134,
+      "corr_heading": -2.9541222771418134,
+      "fused_d": 2.070950634474478,
+      "cam_obs": {
+        "rear": {
+          "seen": true,
+          "active": true,
+          "held": false,
+          "ground_m": 2.070950634474478,
+          "quality": 1.0,
+          "stability": 1.0
+        },
+        "left": {
+          "seen": false,
+          "active": false,
+          "held": false,
+          "ground_m": null,
+          "quality": null,
+          "stability": 0.3
+        }
+      }
+    },
+    {
+      "type": "center",
+      "t": 1770873186.5091252,
+      "clicked_xy": [
+        500.0,
+        897.0
+      ],
+      "raw_center": [
+        497.0693359375,
+        897.242919921875
+      ],
+      "corr_center": [
+        516.243896484375,
+        918.2498779296875
+      ],
+      "raw_heading": -1.7539106026844762,
+      "corr_heading": -1.7539106026844762,
+      "fused_d": 2.053886952941992,
+      "cam_obs": {
+        "rear": {
+          "seen": true,
+          "active": true,
+          "held": false,
+          "ground_m": 2.053886952941992,
+          "quality": 0.55,
+          "stability": 1.0
+        },
+        "left": {
+          "seen": false,
+          "active": false,
+          "held": false,
+          "ground_m": null,
+          "quality": null,
+          "stability": 0.3
+        }
+      }
+    },
+    {
+      "type": "center",
+      "t": 1770873188.447895,
+      "clicked_xy": [
+        500.0,
+        897.0
+      ],
+      "raw_center": [
+        497.0787353515625,
+        897.2666015625
+      ],
+      "corr_center": [
+        516.2529907226562,
+        918.2742309570312
+      ],
+      "raw_heading": -1.7543997142059218,
+      "corr_heading": -1.7543997142059218,
+      "fused_d": 2.053886952941992,
+      "cam_obs": {
+        "rear": {
+          "seen": true,
+          "active": true,
+          "held": false,
+          "ground_m": 2.053886952941992,
+          "quality": 0.55,
+          "stability": 1.0
+        },
+        "left": {
+          "seen": false,
+          "active": false,
+          "held": false,
+          "ground_m": null,
+          "quality": null,
+          "stability": 0.3
+        }
+      }
+    },
+    {
+      "type": "center",
+      "t": 1770873192.046902,
+      "clicked_xy": [
+        500.0,
+        897.0
+      ],
+      "raw_center": [
+        460.84906005859375,
+        881.987548828125
+      ],
+      "corr_center": [
+        475.408447265625,
+        903.4894409179688
+      ],
+      "raw_heading": -0.22216919629354592,
+      "corr_heading": -0.22216919629354592,
+      "fused_d": 2.0924837237811635,
+      "cam_obs": {
+        "rear": {
+          "seen": true,
+          "active": true,
+          "held": false,
+          "ground_m": 2.0924837237811635,
+          "quality": 1.0,
+          "stability": 1.0
+        },
+        "left": {
+          "seen": false,
+          "active": false,
+          "held": false,
+          "ground_m": null,
+          "quality": null,
+          "stability": 0.3
+        }
+      }
+    }
+  ]
+}

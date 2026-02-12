@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "version": 2,
+  "parent_version": 1,
+  "made_from_raw_version": 1,
+  "created_at": 1770873123.769927,
+  "dist_gain_fixed": 0.9,
+  "model": {
+    "type": "affine_distance",
+    "A0": [
+      [
+        1.0050160884857178,
+        -0.07130775600671768
+      ],
+      [
+        0.03529584780335426,
+        1.0202592611312866
+      ]
+    ],
+    "A1": [
+      [
+        0.09706065058708191,
+        -0.009996929205954075
+      ],
+      [
+        -0.03621165081858635,
+        0.012078129686415195
+      ]
+    ],
+    "b0": [
+      -0.0010616964427754283,
+      -0.00048229011008515954
+    ],
+    "b1": [
+      -0.00301907816901803,
+      -0.0015452170046046376
+    ],
+    "yaw_a": 0.0,
+    "yaw_k": 0.0
+  },
+  "fit_stats": {
+    "center_fit": {
+      "n": 26,
+      "rmse_pos_px": 22.06472707885288,
+      "lam": 25096.355021784882
+    },
+    "yaw_fit": {
+      "msg": "not enough yaw samples (need>=2, got=1)"
+    }
+  },
+  "params_used": {
+    "dist_gain_fixed": 0.9,
+    "model": "p*=(A0+dA1)p+(b0+db1), yaw=a+kd",
+    "robust": "soft IRLS 2 rounds (sigma grows with d)",
+    "flicker_fix": "gate(W=5,H=2) + hold(decay=0.8,max_age=12) + stability(N=20,min=0.3)",
+    "freeze_fix": "both-miss freeze + d-hold(max_age=60) + outlier(soft=80.0,hard=220.0)"
+  }
+}
