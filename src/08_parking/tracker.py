@@ -126,7 +126,7 @@ class PathTracker:
                     d = math.dist(center, projection)
                 min_d = min(min_d, d)
             
-            if min_d > 70:
+            if min_d > 50:
                 need_replan = True
 
         if need_replan:
@@ -182,7 +182,7 @@ class PathTracker:
         yaw_error = math.atan2(math.sin(target_yaw - current_yaw), 
                                math.cos(target_yaw - current_yaw))
 
-        dead_zone = math.radians(15)
+        dead_zone = math.radians(10)
         reverse_zone = math.radians(100)
         
         if abs(yaw_error) > reverse_zone: ideal_action = "BACKWARD"

@@ -64,7 +64,7 @@ class CompactTracker:
     def __init__(self):
         # 맵 설정
         self.map_w, self.map_h = 1500, 1500
-        self.grid_w, self.grid_h = 600, 720
+        self.grid_w, self.grid_h = 500, 720
         self.off_x, self.off_y = 200, 150
         self.map_scale = 1.0
         self.wc_w, self.wc_l = 55.0, 66.0
@@ -118,7 +118,7 @@ class CompactTracker:
         cv2.resizeWindow(self.win_name, 600, 600)
         
         # 시나리오 목표 위치 (픽셀 단위) - 주차/출차/A* 모두 공유
-        self.parking_goal = (car_cx, car_rear_y + 100)
+        self.parking_goal = (car_cx - 150, car_rear_y + 150)
         self.exit_goal = (car_cx - 200, car_cy)
         
         # 동적 장애물

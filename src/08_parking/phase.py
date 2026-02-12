@@ -9,7 +9,7 @@ class UnifiedPhaseController:
         
         # --- [주차 전용] 각도 파라미터 ---
         self.park_angle_p1 = (91.0, 92.0)   # 정렬
-        self.park_angle_p3 = (-50.0, -40.0) # 회전 진입
+        self.park_angle_p3 = (-60.0, -50.0) # 회전 진입
         self.park_angle_p5 = (-95.0, -92.0) # 최종 정렬
         
         # --- [출차 전용] 각도 파라미터 (공통 사용 X, 독립 선언) ---

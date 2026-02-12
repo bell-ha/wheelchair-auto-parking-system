@@ -50,7 +50,7 @@ class PathPlanner:
 
         # 경사각 제한 설정
         ALLOWED_SLOPE = math.radians(20) 
-        SLOPE_PENALTY_WEIGHT = 50.0 
+        SLOPE_PENALTY_WEIGHT = 100.0 
 
         open_l = []
         heapq.heappush(open_l, (0, sn, (0, 0)))
