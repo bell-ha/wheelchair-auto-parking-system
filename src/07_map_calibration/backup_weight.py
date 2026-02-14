@@ -1,12 +1,30 @@
 #!/usr/bin/env python3
-# wc_tracker_versioned_affine_calib_distgain90_mp4.py
+# wc_tracker_versioned_calib_dtheta_nosmooth.py
 #
-# ✅ dist_gain=0.90 고정
-# ✅ calib_vN.json / raw_vN.json 버전 관리
-# ✅ c/a는 "기록만"
-# ✅ s에서 raw_vN -> calib_v(N+1) (아핀+거리) 피팅 후 즉시 적용/버전업
-# ✅ 카메라 대신 MP4로 테스트 가능 (../command/1_rear.mp4, ../command/1_left.mp4)
-# ✅ 영상 끝나면 자동 루프
+# 목표:
+#  - smoothing(EMA/버퍼) 없이 "프레임별 추정 raw"를 그대로 사용해서 오차를 관찰
+#  - c/a는 raw 샘플만 기록(즉시 보정 반영 X)
+#  - s를 누르면 raw_vN으로부터 calib_v(N+1) 생성 + 즉시 적용(버전 스위치)
+#  - raw_vN.json은 "해당 버전에서 처음 c/a로 기록할 때" 생성됨
+#
+# 보정 모델(거리 d + heading θ 의존):
+#  - 좌표: p_corr = p_raw + Δp(d,θ)
+#        Δx = bx · [1, d, cosθ, sinθ, dcosθ, dsinθ]
+#        Δy = by · [1, d, cosθ, sinθ, dcosθ, dsinθ]
+#  - 각도: θ_corr = wrap( θ_raw + Δθ(d,θ) )
+#        Δθ = bt · [1, d, cosθ, sinθ, dcosθ, dsinθ]
+#
+# Keys:
+#   q/ESC: quit
+#   r    : reset tracking (pose만)
+#   c    : record CENTER sample (click true center)
+#   a    : record YAW sample (click center then direction)
+#   s    : fit -> save calib_v(N+1) and switch to it
+#
+# Optional:
+#   --rear 0 --left 1              (camera indices)
+#   --rear ../command/1_rear.mp4   (video file)
+#   --left ../command/1_left.mp4
 
 import cv2
 import numpy as np
@@ -15,17 +33,11 @@ import time
 import json
 import os
 import glob
+import argparse
 from dataclasses import dataclass
 from collections import deque
+from typing import Any, Dict, List, Optional
 
-# =========================
-# ✅ INPUT MODE: MP4 files
-# =========================
-USE_VIDEO_FILES = True  # True면 mp4, False면 카메라(0/1)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-REAR_VIDEO = os.path.normpath(os.path.join(BASE_DIR, "../command/1_rear.mp4"))
-LEFT_VIDEO = os.path.normpath(os.path.join(BASE_DIR, "../command/1_left.mp4"))
-LOOP_VIDEO = True  # 영상 끝나면 처음으로 되감기
 
 # =========================
 # Intrinsic (shared fisheye)
@@ -53,6 +65,10 @@ OBJ_POINTS = np.array([
 ], dtype=np.float32)
 
 
+def clamp(x: float, lo: float, hi: float) -> float:
+    return float(max(lo, min(hi, x)))
+
+
 def wrap360(deg: float) -> float:
     deg = deg % 360.0
     return deg + 360.0 if deg < 0 else deg
@@ -68,10 +84,23 @@ def compass_deg_to_map_rad(compass_deg: float) -> float:
     return math.radians(mdeg)
 
 
+def _parse_src(s: str) -> Any:
+    try:
+        if s.strip().isdigit():
+            return int(s.strip())
+    except Exception:
+        pass
+    return s
+
+
+def _open_capture(src: Any) -> cv2.VideoCapture:
+    return cv2.VideoCapture(src)
+
+
 @dataclass
 class CamCfg:
     key: str
-    index: int
+    index: Any  # int or str path
     pos_px: np.ndarray
     h_cm: float
     map_angle_deg: float
@@ -79,37 +108,52 @@ class CamCfg:
     install_angle: float
     install_offset: float
     yaw_trim_deg: float = 0.0
-    dist_gain: float = 0.90  # ✅ fixed
+    dist_gain: float = 0.90  # fixed
 
 
 @dataclass
 class CalibModel:
     version: int
-    # position: p* = (A0 + d*A1) p + (b0 + d*b1)
-    A0: np.ndarray  # (2,2)
-    A1: np.ndarray  # (2,2)
-    b0: np.ndarray  # (2,)
-    b1: np.ndarray  # (2,)
-    # yaw: theta* = theta + (a + k*d)
-    yaw_a: float
-    yaw_k: float
+    # Δx = bx·phi, Δy = by·phi, Δθ = bt·phi
+    bx: np.ndarray  # (6,)
+    by: np.ndarray  # (6,)
+    bt: np.ndarray  # (6,)
     created_at: float
     parent_version: int = 0
     made_from_raw_version: int = 0
 
-    def transform_pos(self, p_raw: np.ndarray, d: float) -> np.ndarray:
+    @staticmethod
+    def phi(d: float, theta: float) -> np.ndarray:
         d = float(d if d is not None else 0.0)
-        M = self.A0 + self.A1 * d
-        t = self.b0 + self.b1 * d
-        return (M @ p_raw.astype(np.float32).reshape(2,)) + t.astype(np.float32)
+        c = math.cos(float(theta))
+        s = math.sin(float(theta))
+        return np.array([1.0, d, c, s, d * c, d * s], dtype=np.float32)
 
-    def transform_yaw(self, yaw_raw: float, d: float) -> float:
-        d = float(d if d is not None else 0.0)
-        return wrap_pi(float(yaw_raw) + float(self.yaw_a + self.yaw_k * d))
+    def transform_pos(self, p_raw: np.ndarray, d: float, theta: float) -> np.ndarray:
+        ph = self.phi(d, theta)
+        dx = float(np.dot(self.bx, ph))
+        dy = float(np.dot(self.by, ph))
+        return p_raw.astype(np.float32).reshape(2,) + np.array([dx, dy], dtype=np.float32)
+
+    def transform_yaw(self, yaw_raw: float, d: float, theta: float) -> float:
+        ph = self.phi(d, theta)
+        dth = float(np.dot(self.bt, ph))
+        return wrap_pi(float(yaw_raw) + dth)
+
+
+@dataclass
+class CamGateState:
+    gate_hist: deque
+    stab_hist: deque
+    active: bool = False
+    last_det: Optional[Dict[str, Any]] = None
+    last_seen_frame: int = -10_000
+    prev_seen: bool = False
+    ramp_seen: int = 0
 
 
 class WheelchairTracker:
-    def __init__(self):
+    def __init__(self, rear_src: Any = 0, left_src: Any = 1):
         # =========================
         # Map params
         # =========================
@@ -132,23 +176,26 @@ class WheelchairTracker:
         self.center_offset_cm_by_id = {0: 23.0, 1: 23.0}
 
         # =========================
-        # Tracking smoothing (anti-jitter)
+        # Flicker handling (gate/hold)
         # =========================
-        self.alpha = 0.30
-        self.bufN = 5
-        self.buf_center = deque(maxlen=self.bufN)
-        self.buf_sin = deque(maxlen=self.bufN)
-        self.buf_cos = deque(maxlen=self.bufN)
-
-        self.turn_fast_deg = 35.0
-        self.alpha_fast = 0.85
-        self.heading_mag_min = 0.25
-
-        self.lost_count = 0
-        self.lost_reset_frames = 8
+        self.gate_W = 5
+        self.gate_H = 2
+        self.hold_decay = 0.80
+        self.hold_max_age = 10
+        self.stab_N = 20
+        self.stab_min = 0.30
+        self.reentry_ramp_len = 3
+        self.consistency_min = 0.15
 
         # =========================
-        # Quality (for display / saving)
+        # Tilt(view angle) weighting
+        # =========================
+        self.tilt_good_deg = 15.0
+        self.tilt_bad_deg = 60.0
+        self.view_min = 0.20
+
+        # =========================
+        # Quality
         # =========================
         self.reproj_good_px = 2.0
         self.reproj_bad_px = 8.0
@@ -157,11 +204,11 @@ class WheelchairTracker:
         self.min_quality_w = 0.08
 
         # =========================
-        # Camera configs (dist_gain fixed 0.90)
+        # Camera configs (dist_gain fixed)
         # =========================
         self.cams = {
             "rear": CamCfg(
-                key="rear", index=0,
+                key="rear", index=rear_src,
                 pos_px=np.array([301.4 + self.off_x, 540.0 + self.off_y], dtype=np.float32),
                 h_cm=105.5,
                 map_angle_deg=90.0,
@@ -172,7 +219,7 @@ class WheelchairTracker:
                 dist_gain=0.90
             ),
             "left": CamCfg(
-                key="left", index=1,
+                key="left", index=left_src,
                 pos_px=np.array([200.0 + self.off_x, 270.0 + self.off_y], dtype=np.float32),
                 h_cm=110.0,
                 map_angle_deg=157.0,
@@ -184,51 +231,55 @@ class WheelchairTracker:
             )
         }
 
+        self.cam_gate: Dict[str, CamGateState] = {
+            "rear": CamGateState(gate_hist=deque(maxlen=self.gate_W), stab_hist=deque(maxlen=self.stab_N)),
+            "left": CamGateState(gate_hist=deque(maxlen=self.gate_W), stab_hist=deque(maxlen=self.stab_N)),
+        }
+
         # =========================
         # Versioned calibration / raw data
         # =========================
         self.active_version = self._find_or_create_latest_calib()
         self.calib = self._load_calib(self.active_version)
-        self.raw_samples = self._load_or_create_raw(self.active_version)
+
+        # raw samples: 파일이 있으면 로드, 없으면 [] (파일 생성은 첫 기록 시)
+        self.raw_samples: List[dict] = self._load_raw_if_exists(self.active_version)
+        self.raw_file_created = os.path.exists(self._raw_path(self.active_version))
 
         # =========================
-        # ✅ Open inputs (MP4 or cameras)
+        # Camera open
         # =========================
-        if USE_VIDEO_FILES:
-            if not os.path.exists(REAR_VIDEO):
-                raise FileNotFoundError(f"rear video not found: {REAR_VIDEO}")
-            if not os.path.exists(LEFT_VIDEO):
-                raise FileNotFoundError(f"left video not found: {LEFT_VIDEO}")
+        self.cap_rear = _open_capture(self.cams["rear"].index)
+        self.cap_left = _open_capture(self.cams["left"].index)
+        if not self.cap_rear.isOpened() or not self.cap_left.isOpened():
+            raise RuntimeError(
+                "카메라/비디오 오픈 실패.\n"
+                "예) --rear 0 --left 1  또는  --rear ../command/1_rear.mp4 --left ../command/1_left.mp4"
+            )
 
-            self.cap_rear = cv2.VideoCapture(REAR_VIDEO)
-            self.cap_left = cv2.VideoCapture(LEFT_VIDEO)
-            if not self.cap_rear.isOpened() or not self.cap_left.isOpened():
-                raise RuntimeError("MP4 오픈 실패: 경로/코덱 확인")
-
-            print(f"[INPUT] MP4 rear={REAR_VIDEO}")
-            print(f"[INPUT] MP4 left={LEFT_VIDEO}")
-        else:
-            self.cap_rear = cv2.VideoCapture(self.cams["rear"].index)
-            self.cap_left = cv2.VideoCapture(self.cams["left"].index)
-            if not self.cap_rear.isOpened() or not self.cap_left.isOpened():
-                raise RuntimeError("카메라 오픈 실패: 인덱스(0/1) 확인")
-            print("[INPUT] Cameras 0/1")
-
-        # fused state (no calib applied here)
-        self.raw_center = None
-        self.raw_heading = 0.0
+        # =========================
+        # NO SMOOTHING: raw pose == fused pose (프레임마다)
+        # =========================
+        self.raw_center: Optional[np.ndarray] = None
+        self.raw_heading: float = 0.0
         self.is_initialized = False
 
+        # 거리(보정용) - FREEZE에서도 마지막 값 유지
+        self.latest_fused_d: Optional[float] = None
+
         # per-frame caches (for click saving)
-        self.latest_raw_center = None
-        self.latest_raw_heading = 0.0
-        self.latest_corr_center = None
-        self.latest_corr_heading = 0.0
-        self.latest_fused_d = None
+        self.latest_raw_center: Optional[np.ndarray] = None
+        self.latest_raw_heading: float = 0.0
+        self.latest_corr_center: Optional[np.ndarray] = None
+        self.latest_corr_heading: float = 0.0
+
         self.latest_cam_obs = {
-            "rear": {"seen": False, "ground_m": None, "quality": None},
-            "left": {"seen": False, "ground_m": None, "quality": None},
+            "rear": {"seen": False, "active": False, "held": False, "ground_m": None, "quality": None, "stability": None, "tilt_deg": None},
+            "left": {"seen": False, "active": False, "held": False, "ground_m": None, "quality": None, "stability": None, "tilt_deg": None},
         }
+
+        self.lost_count = 0
+        self.lost_reset_frames = 12
 
         # UI
         self.win_map = "minimap"
@@ -237,20 +288,18 @@ class WheelchairTracker:
         cv2.namedWindow(self.win_mon, cv2.WINDOW_NORMAL)
         cv2.setMouseCallback(self.win_map, self._on_mouse)
 
-        cv2.createTrackbar("Smooth(0-100)", self.win_map, int(self.alpha * 100), 100, lambda v: None)
-
         # click mode
         self.click_mode = None  # None | record_center | record_yaw_center | record_yaw_dir
         self.tmp_yaw_center = None
 
-        print("[Versioned Calib]")
-        print(f"  ACTIVE calib_v{self.active_version}.json  (raw -> raw_v{self.active_version}.json)")
-        print("[Keys]")
-        print("  q/ESC : quit")
-        print("  r     : reset tracking filter (not calib)")
-        print("  c     : record CENTER sample (click true center on map)")
-        print("  a     : record YAW sample (click center then direction)")
-        print("  s     : fit from raw_vN -> make calib_v(N+1) and switch")
+        self.frame_idx = 0
+
+        print("[NO-SMOOTH Versioned Calib]")
+        print(f"  ACTIVE calib_v{self.active_version}.json")
+        print(f"  RAW    raw_v{self.active_version}.json  (created={self.raw_file_created}, samples={len(self.raw_samples)})")
+        print("[Keys] q/ESC quit | r reset pose | c record center | a record yaw | s fit->next version")
+        print("[Note] raw 파일은 '첫 c/a 기록' 때 생성됩니다.")
+        print("[UI] RAW(주황 틀)는 제거됨. CORR(초록)만 표시합니다.")
 
     # ============================================================
     # Versioned file helpers
@@ -265,7 +314,7 @@ class WheelchairTracker:
 
     def _find_or_create_latest_calib(self) -> int:
         files = glob.glob("calib_v*.json")
-        vers = []
+        vers: List[int] = []
         for f in files:
             base = os.path.basename(f)
             try:
@@ -276,22 +325,19 @@ class WheelchairTracker:
         if vers:
             return max(vers)
 
-        # create v1 default
+        # create v1 default (all zeros => no correction)
         v1 = 1
         default = CalibModel(
             version=v1,
-            A0=np.eye(2, dtype=np.float32),
-            A1=np.zeros((2, 2), dtype=np.float32),
-            b0=np.zeros((2,), dtype=np.float32),
-            b1=np.zeros((2,), dtype=np.float32),
-            yaw_a=0.0,
-            yaw_k=0.0,
+            bx=np.zeros((6,), dtype=np.float32),
+            by=np.zeros((6,), dtype=np.float32),
+            bt=np.zeros((6,), dtype=np.float32),
             created_at=time.time(),
             parent_version=0,
             made_from_raw_version=0,
         )
-        self._save_calib(default)
-        print("[INIT] created calib_v1.json (identity / zero)")
+        self._save_calib(default, fit_stats={"msg": "init zero model"}, params_used={"model": "delta(d,theta) linear"})
+        print("[INIT] created calib_v1.json (zero correction)")
         return v1
 
     def _load_calib(self, ver: int) -> CalibModel:
@@ -299,23 +345,20 @@ class WheelchairTracker:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        A0 = np.array(data["model"]["A0"], dtype=np.float32)
-        A1 = np.array(data["model"]["A1"], dtype=np.float32)
-        b0 = np.array(data["model"]["b0"], dtype=np.float32)
-        b1 = np.array(data["model"]["b1"], dtype=np.float32)
-        yaw_a = float(data["model"].get("yaw_a", 0.0))
-        yaw_k = float(data["model"].get("yaw_k", 0.0))
+        m = data.get("model", {})
+        bx = np.array(m.get("bx", [0, 0, 0, 0, 0, 0]), dtype=np.float32)
+        by = np.array(m.get("by", [0, 0, 0, 0, 0, 0]), dtype=np.float32)
+        bt = np.array(m.get("bt", [0, 0, 0, 0, 0, 0]), dtype=np.float32)
 
         return CalibModel(
             version=int(data.get("version", ver)),
-            A0=A0, A1=A1, b0=b0, b1=b1,
-            yaw_a=yaw_a, yaw_k=yaw_k,
+            bx=bx, by=by, bt=bt,
             created_at=float(data.get("created_at", time.time())),
             parent_version=int(data.get("parent_version", 0)),
             made_from_raw_version=int(data.get("made_from_raw_version", 0)),
         )
 
-    def _save_calib(self, calib: CalibModel, fit_stats: dict | None = None, params_used: dict | None = None):
+    def _save_calib(self, calib: CalibModel, fit_stats: Optional[dict] = None, params_used: Optional[dict] = None):
         path = self._calib_path(calib.version)
         data = {
             "schema_version": 1,
@@ -325,13 +368,11 @@ class WheelchairTracker:
             "created_at": calib.created_at,
             "dist_gain_fixed": 0.90,
             "model": {
-                "type": "affine_distance",
-                "A0": calib.A0.tolist(),
-                "A1": calib.A1.tolist(),
-                "b0": calib.b0.tolist(),
-                "b1": calib.b1.tolist(),
-                "yaw_a": float(calib.yaw_a),
-                "yaw_k": float(calib.yaw_k),
+                "type": "delta_linear_d_theta",
+                "phi": ["1", "d", "cos(theta)", "sin(theta)", "d*cos(theta)", "d*sin(theta)"],
+                "bx": calib.bx.tolist(),
+                "by": calib.by.tolist(),
+                "bt": calib.bt.tolist(),
             },
             "fit_stats": fit_stats or {},
             "params_used": params_used or {},
@@ -340,19 +381,35 @@ class WheelchairTracker:
             json.dump(data, f, ensure_ascii=False, indent=2)
         print(f"[SAVE] {path}")
 
-    def _load_or_create_raw(self, ver: int) -> list:
+    def _load_raw_if_exists(self, ver: int) -> List[dict]:
         path = self._raw_path(ver)
         if not os.path.exists(path):
-            data = {"schema_version": 1, "calib_version": ver, "created_at": time.time(), "samples": []}
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            print(f"[INIT] created {path}")
             return []
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data.get("samples", []) or []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("samples", []) or []
+        except Exception as e:
+            print("[WARN] raw load failed:", e)
+            return []
+
+    def _ensure_raw_file(self):
+        if self.raw_file_created:
+            return
+        path = self._raw_path(self.active_version)
+        data = {
+            "schema_version": 1,
+            "calib_version": self.active_version,
+            "created_at": time.time(),
+            "samples": []
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        self.raw_file_created = True
+        print(f"[INIT] created {path}")
 
     def _flush_raw(self):
+        self._ensure_raw_file()
         path = self._raw_path(self.active_version)
         data = {
             "schema_version": 1,
@@ -362,12 +419,6 @@ class WheelchairTracker:
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-
-    # ============================================================
-    # Trackbars
-    # ============================================================
-    def update_from_trackbars(self):
-        self.alpha = max(0.01, cv2.getTrackbarPos("Smooth(0-100)", self.win_map) / 100.0)
 
     # ============================================================
     # Geometry helpers
@@ -383,19 +434,35 @@ class WheelchairTracker:
             return marker_pos_px + np.array([dx, dy], dtype=np.float32)
 
     @staticmethod
-    def smooth01(x, x0, x1):
-        if x <= x0:
+    def smooth01_small_is_good(x: float, x_good: float, x_bad: float) -> float:
+        # small is good: 1 at <=good, 0 at >=bad
+        if x <= x_good:
             return 1.0
-        if x >= x1:
+        if x >= x_bad:
             return 0.0
-        t = (x - x0) / (x1 - x0)
+        t = (x - x_good) / (x_bad - x_good)
         return float(1.0 - t)
+
+    @staticmethod
+    def smooth01_large_is_good(x: float, x_bad: float, x_good: float) -> float:
+        # large is good: 0 at <=bad, 1 at >=good
+        if x <= x_bad:
+            return 0.0
+        if x >= x_good:
+            return 1.0
+        t = (x - x_bad) / (x_good - x_bad)
+        return float(t)
+
+    def tilt_view_weight(self, tilt_deg: float) -> float:
+        # tilt 0 좋음, 90 나쁨
+        w = self.smooth01_small_is_good(float(tilt_deg), self.tilt_good_deg, self.tilt_bad_deg)
+        return float(max(self.view_min, min(1.0, w)))
 
     # ============================================================
     # Detection / estimation
     # ============================================================
-    def estimate_from_frame(self, frame, cam: CamCfg):
-        dets = []
+    def estimate_from_frame(self, frame, cam: CamCfg) -> List[Dict[str, Any]]:
+        dets: List[Dict[str, Any]] = []
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = detector.detectMarkers(gray)
         if ids is None:
@@ -423,8 +490,7 @@ class WheelchairTracker:
             mh = float(self.marker_h_cm_by_id.get(mid, self.marker_h_cm_default))
             dh_m = abs(cam.h_cm - mh) / 100.0
             ground_m = math.sqrt(max(0.0, dist_m * dist_m - dh_m * dh_m))
-
-            ground_cm = ground_m * 100.0 * cam.dist_gain  # ✅ fixed gain
+            ground_cm = ground_m * 100.0 * cam.dist_gain  # fixed
 
             bearing_deg = math.degrees(math.atan2(float(tvec[0]), float(tvec[2])))
             ray_deg = cam.map_angle_deg + cam.yaw_trim_deg + bearing_deg
@@ -436,12 +502,19 @@ class WheelchairTracker:
             ], dtype=np.float32)
 
             rmat, _ = cv2.Rodrigues(rvec)
+
+            # tilt
+            nz = float(abs(rmat[2, 2]))
+            nz = clamp(nz, 0.0, 1.0)
+            tilt_deg = float(math.degrees(math.acos(nz)))
+            w_view = self.tilt_view_weight(tilt_deg)
+
+            # yaw
             sy = math.sqrt(rmat[0, 0] ** 2 + rmat[1, 0] ** 2)
             raw_yaw_deg = math.degrees(math.atan2(-rmat[2, 0], sy))
 
             total = (raw_yaw_deg * cam.sens) + cam.install_angle
             yaw_compass = total - cam.install_offset
-
             if mid == 1:
                 yaw_compass = wrap360(yaw_compass + 180.0)
             else:
@@ -450,6 +523,7 @@ class WheelchairTracker:
             heading_map = compass_deg_to_map_rad(yaw_compass)
             center_pos = self.marker_to_center(marker_pos, heading_map, mid)
 
+            # quality
             area = float(abs(cv2.contourArea(c2)))
             proj, _ = cv2.projectPoints(OBJ_POINTS, rvec, tvec, K, None)
             proj = proj.reshape(-1, 2).astype(np.float32)
@@ -460,16 +534,19 @@ class WheelchairTracker:
             z = float(tvec[2])
             z_score = 1.0 if z > 0.05 else 0.0
 
-            s_area = self.smooth01(area, self.area_good_px2, self.area_bad_px2)
-            s_err = self.smooth01(reproj_err, self.reproj_good_px, self.reproj_bad_px)
+            s_area = self.smooth01_large_is_good(area, self.area_bad_px2, self.area_good_px2)
+            s_err = self.smooth01_small_is_good(reproj_err, self.reproj_good_px, self.reproj_bad_px)
             quality = max(self.min_quality_w, (0.45 * s_err + 0.45 * s_area + 0.10 * z_score))
+            quality = float(max(self.min_quality_w, quality * (0.6 + 0.4 * w_view)))
 
+            # base weight
             cx = float(np.mean(c2[:, 0]))
             rel_x = (cx - frame.shape[1] / 2) / (frame.shape[1] / 2)
             w_center = max(0.1, 1.0 - abs(rel_x))
             w_dist = 1.0 / (1.0 + ground_m)
             w_base = float(max(0.05, w_center * w_dist))
-            w = float(w_base * quality)
+
+            w = float(w_base * quality * w_view)
 
             dets.append({
                 "marker_id": mid,
@@ -483,51 +560,143 @@ class WheelchairTracker:
                     "area": float(area),
                     "reproj": float(reproj_err),
                     "ground_m": float(ground_m),
-                }
+                    "tilt_deg": float(tilt_deg),
+                    "view_w": float(w_view),
+                },
+                "held": False,
             })
 
         return dets
 
-    def fuse(self, dets):
+    @staticmethod
+    def _clone_det(d: Dict[str, Any]) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        for k, v in d.items():
+            if isinstance(v, np.ndarray):
+                out[k] = v.copy()
+            elif isinstance(v, dict):
+                out[k] = dict(v)
+            else:
+                out[k] = v
+        return out
+
+    def _apply_cam_gate_and_hold(self, cam_best: Dict[str, Optional[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        any_seen = (cam_best["rear"] is not None) or (cam_best["left"] is not None)
+        dets_fuse: List[Dict[str, Any]] = []
+
+        for ck in ("rear", "left"):
+            g = self.cam_gate[ck]
+            seen = cam_best[ck] is not None
+
+            g.gate_hist.append(1 if seen else 0)
+            g.stab_hist.append(1 if seen else 0)
+
+            if sum(g.gate_hist) >= self.gate_H:
+                g.active = True
+            elif (len(g.gate_hist) == self.gate_W) and (sum(g.gate_hist) == 0):
+                g.active = False
+
+            det_rate = float(sum(g.stab_hist) / max(1, len(g.stab_hist)))
+            stability = float(np.clip(det_rate, self.stab_min, 1.0))
+
+            det_eff: Optional[Dict[str, Any]] = None
+            held = False
+            ramp = 0.0
+
+            if seen:
+                if not g.prev_seen:
+                    g.ramp_seen = 0
+                g.prev_seen = True
+
+                det_eff = self._clone_det(cam_best[ck])
+                g.last_det = self._clone_det(cam_best[ck])
+                g.last_seen_frame = self.frame_idx
+                held = False
+
+                g.ramp_seen = min(self.reentry_ramp_len, g.ramp_seen + 1)
+                ramp = float(g.ramp_seen) / float(self.reentry_ramp_len)
+            else:
+                g.prev_seen = False
+                if not any_seen:
+                    det_eff = None
+                else:
+                    age = self.frame_idx - g.last_seen_frame
+                    if g.active and (g.last_det is not None) and (age <= self.hold_max_age):
+                        det_eff = self._clone_det(g.last_det)
+                        det_eff["weight"] = float(det_eff["weight"]) * (self.hold_decay ** max(0, age))
+                        det_eff["held"] = True
+                        held = True
+                    else:
+                        det_eff = None
+
+            if det_eff is None:
+                self.latest_cam_obs[ck] = {
+                    "seen": bool(seen),
+                    "active": bool(g.active),
+                    "held": False,
+                    "ground_m": None,
+                    "quality": None,
+                    "stability": stability,
+                    "tilt_deg": None,
+                }
+                continue
+
+            q = float(det_eff.get("dbg_quality", {}).get("quality", 0.5))
+            gm = float(det_eff.get("dbg_quality", {}).get("ground_m", 0.0))
+            tilt_deg = det_eff.get("dbg_quality", {}).get("tilt_deg", None)
+
+            self.latest_cam_obs[ck] = {
+                "seen": bool(seen),
+                "active": bool(g.active),
+                "held": bool(held),
+                "ground_m": gm,
+                "quality": q,
+                "stability": stability,
+                "tilt_deg": tilt_deg,
+            }
+
+            det_eff["weight"] = float(det_eff["weight"]) * stability
+
+            if seen:
+                det_eff["weight"] = float(det_eff["weight"]) * float(max(0.2, min(1.0, ramp)))
+
+            # consistency soft-gate
+            if self.raw_center is not None:
+                diff = float(np.linalg.norm(det_eff["center_pos"] - self.raw_center))
+                sigma_px = 120.0 + 80.0 * clamp(gm, 0.0, 5.0)
+                w_cons = 1.0 / (1.0 + (diff / sigma_px) ** 2)
+                w_cons = float(max(self.consistency_min, min(1.0, w_cons)))
+                det_eff["weight"] = float(det_eff["weight"]) * w_cons
+                det_eff.setdefault("dbg_quality", {})
+                det_eff["dbg_quality"]["consistency_w"] = w_cons
+                det_eff["dbg_quality"]["diff_px"] = diff
+
+            dets_fuse.append(det_eff)
+
+        return dets_fuse
+
+    def fuse(self, dets: List[Dict[str, Any]]):
         if not dets:
             return None
-        total_w = sum(d["weight"] for d in dets)
+        total_w = sum(float(d["weight"]) for d in dets)
         if total_w <= 1e-9:
             return None
-        center = sum(d["center_pos"] * d["weight"] for d in dets) / total_w
-        s = sum(math.sin(d["heading"]) * d["weight"] for d in dets) / total_w
-        c = sum(math.cos(d["heading"]) * d["weight"] for d in dets) / total_w
+
+        center = sum(d["center_pos"] * float(d["weight"]) for d in dets) / total_w
+        s = sum(math.sin(float(d["heading"])) * float(d["weight"]) for d in dets) / total_w
+        c = sum(math.cos(float(d["heading"])) * float(d["weight"]) for d in dets) / total_w
         heading = math.atan2(s, c)
 
-        d_fused = None
-        sw = 0.0
         sd = 0.0
-        for d in dets:
-            gm = float(d["dbg_quality"]["ground_m"])
-            w = float(d["weight"])
+        sw = 0.0
+        for dct in dets:
+            gm = float(dct["dbg_quality"]["ground_m"])
+            w = float(dct["weight"])
             sd += gm * w
             sw += w
-        if sw > 1e-9:
-            d_fused = sd / sw
+        d_fused = (sd / sw) if sw > 1e-9 else None
 
         return center, heading, d_fused
-
-    # ============================================================
-    # Robust buffer helpers
-    # ============================================================
-    def _robust_measurement_from_buffer(self, latest_center, latest_heading):
-        xs = [float(p[0]) for p in self.buf_center]
-        ys = [float(p[1]) for p in self.buf_center]
-        med_center = np.array([np.median(xs), np.median(ys)], dtype=np.float32)
-
-        s = float(np.mean(self.buf_sin)) if len(self.buf_sin) else math.sin(latest_heading)
-        c = float(np.mean(self.buf_cos)) if len(self.buf_cos) else math.cos(latest_heading)
-        mag = math.hypot(s, c)
-        if mag < self.heading_mag_min:
-            med_heading = latest_heading
-        else:
-            med_heading = math.atan2(s, c)
-        return med_center, med_heading, mag
 
     # ============================================================
     # Calibration application
@@ -536,8 +705,9 @@ class WheelchairTracker:
         if self.raw_center is None:
             return None
         d = self.latest_fused_d if self.latest_fused_d is not None else 0.0
-        c = self.calib.transform_pos(self.raw_center, d)
-        h = self.calib.transform_yaw(self.raw_heading, d)
+        theta = self.raw_heading
+        c = self.calib.transform_pos(self.raw_center, d, theta)
+        h = self.calib.transform_yaw(self.raw_heading, d, theta)
         return c, h
 
     # ============================================================
@@ -558,13 +728,11 @@ class WheelchairTracker:
 
         self._draw_grid(img, 0, 0, self.map_w - 1, self.map_h - 1,
                         step, (25, 25, 25), (45, 45, 45), major_step)
-
         self._draw_grid(img, self.off_x, self.off_y, self.grid_w, self.grid_h,
                         step, (45, 45, 45), (80, 80, 80), major_step)
 
         cv2.rectangle(img, (self.off_x, self.off_y),
                       (self.off_x + self.grid_w, self.off_y + self.grid_h), (200, 200, 200), 2)
-
         cv2.rectangle(img, self.car_zone[0], self.car_zone[1], (35, 35, 45), -1)
 
         for cam in self.cams.values():
@@ -573,7 +741,7 @@ class WheelchairTracker:
             cv2.putText(img, cam.key, (cp[0] + 8, cp[1] - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1, cv2.LINE_AA)
 
-    def draw_wheelchair(self, img, center, heading, color=(0, 255, 0), label="CORR"):
+    def draw_wheelchair(self, img, center, heading, color, label):
         w_px = (self.wc_w_cm * self.map_scale) / 2.0
         l_px = (self.wc_l_cm * self.map_scale) / 2.0
 
@@ -593,19 +761,20 @@ class WheelchairTracker:
         cv2.putText(img, label, (int(center[0]) + 10, int(center[1]) + 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
 
-    def draw_hud(self, img, dets):
+    def draw_hud(self, img, dets_fuse: List[Dict[str, Any]]):
         y = 20
-        cv2.putText(img, f"ACTIVE: calib_v{self.active_version}.json   RECORD: raw_v{self.active_version}.json (samples={len(self.raw_samples)})",
-                    (10, y), 0, 0.55, (220, 220, 220), 2, cv2.LINE_AA); y += 22
-        cv2.putText(img, f"alpha={self.alpha:.2f}  bufN={self.bufN}  lost={self.lost_count}/{self.lost_reset_frames}  dist_gain(fixed)=0.90",
+        cv2.putText(img, f"ACTIVE calib_v{self.active_version}.json | RAW raw_v{self.active_version}.json created={self.raw_file_created} samples={len(self.raw_samples)}",
                     (10, y), 0, 0.55, (220, 220, 220), 2, cv2.LINE_AA); y += 22
 
-        if self.latest_fused_d is not None:
-            cv2.putText(img, f"fused_d={self.latest_fused_d:.2f}m  rear={self.latest_cam_obs['rear']['ground_m']}  left={self.latest_cam_obs['left']['ground_m']}",
-                        (10, y), 0, 0.5, (200, 200, 200), 2, cv2.LINE_AA); y += 20
-        else:
-            cv2.putText(img, f"fused_d=None  rear_seen={self.latest_cam_obs['rear']['seen']} left_seen={self.latest_cam_obs['left']['seen']}",
-                        (10, y), 0, 0.5, (200, 200, 200), 2, cv2.LINE_AA); y += 20
+        r = self.latest_cam_obs["rear"]
+        l = self.latest_cam_obs["left"]
+        fd = self.latest_fused_d
+        cv2.putText(img, f"fused_d={None if fd is None else f'{fd:.2f}m'} | rear seen={r['seen']} held={r['held']} stab={r['stability']:.2f} tilt={r['tilt_deg']} | left seen={l['seen']} held={l['held']} stab={l['stability']:.2f} tilt={l['tilt_deg']}",
+                    (10, y), 0, 0.45, (200, 200, 200), 2, cv2.LINE_AA); y += 20
+
+        if self.lost_count > 0:
+            cv2.putText(img, f"STATE: FREEZE (no detections this frame) lost={self.lost_count}",
+                        (10, y), 0, 0.6, (0, 140, 255), 2, cv2.LINE_AA); y += 22
 
         if self.click_mode == "record_center":
             cv2.putText(img, "MODE: center -> click TRUE center point", (10, y), 0, 0.65, (0, 255, 255), 2, cv2.LINE_AA); y += 24
@@ -614,20 +783,27 @@ class WheelchairTracker:
         elif self.click_mode == "record_yaw_dir":
             cv2.putText(img, "MODE: yaw -> click DIRECTION point", (10, y), 0, 0.65, (0, 255, 255), 2, cv2.LINE_AA); y += 24
 
-        if dets:
-            best = max(dets, key=lambda d: d["weight"])
-            q = best.get("dbg_quality", {})
-            cv2.putText(img, f"best[{best['cam_key']}/ID{best['marker_id']}] q={q.get('quality',0):.2f} area={q.get('area',0):.0f} reproj={q.get('reproj',0):.2f}",
-                        (10, y), 0, 0.5, (200, 200, 200), 2, cv2.LINE_AA)
+        if dets_fuse:
+            tags = []
+            for d in dets_fuse:
+                t = f"{d['cam_key']}{'(H)' if d.get('held', False) else ''}"
+                tags.append(t)
+            cv2.putText(img, f"fuse uses: {', '.join(tags)}", (10, y), 0, 0.5, (180, 180, 180), 2, cv2.LINE_AA)
 
     # ============================================================
-    # Mouse callback (record only)
+    # Mouse callback (record only; no corr 저장)
     # ============================================================
     def _on_mouse(self, event, x, y, flags, param):
         if event != cv2.EVENT_LBUTTONDOWN:
             return
 
-        if not self.is_initialized or self.latest_raw_center is None or self.latest_corr_center is None:
+        if self.lost_count > 0:
+            print("[CLICK] ignored: currently FREEZE (no fresh detection)")
+            self.click_mode = None
+            self.tmp_yaw_center = None
+            return
+
+        if not self.is_initialized or self.latest_raw_center is None:
             print("[CLICK] ignored: tracker not initialized")
             self.click_mode = None
             self.tmp_yaw_center = None
@@ -641,16 +817,16 @@ class WheelchairTracker:
             "left": dict(self.latest_cam_obs["left"]),
         }
         fused_d = self.latest_fused_d
+        theta = float(self.latest_raw_heading)
 
         if self.click_mode == "record_center":
+            self._ensure_raw_file()
             sample = {
                 "type": "center",
                 "t": now,
                 "clicked_xy": [float(pt[0]), float(pt[1])],
                 "raw_center": [float(self.latest_raw_center[0]), float(self.latest_raw_center[1])],
-                "corr_center": [float(self.latest_corr_center[0]), float(self.latest_corr_center[1])],
-                "raw_heading": float(self.latest_raw_heading),
-                "corr_heading": float(self.latest_corr_heading),
+                "raw_heading": float(theta),
                 "fused_d": None if fused_d is None else float(fused_d),
                 "cam_obs": obs
             }
@@ -678,14 +854,13 @@ class WheelchairTracker:
 
             clicked_heading = float(math.atan2(float(v[1]), float(v[0])))
 
+            self._ensure_raw_file()
             sample = {
                 "type": "yaw",
                 "t": now,
                 "clicked_heading": float(clicked_heading),
-                "raw_heading": float(self.latest_raw_heading),
-                "corr_heading": float(self.latest_corr_heading),
+                "raw_heading": float(theta),
                 "raw_center": [float(self.latest_raw_center[0]), float(self.latest_raw_center[1])],
-                "corr_center": [float(self.latest_corr_center[0]), float(self.latest_corr_center[1])],
                 "fused_d": None if fused_d is None else float(fused_d),
                 "cam_obs": obs
             }
@@ -698,7 +873,7 @@ class WheelchairTracker:
             return
 
     # ============================================================
-    # Fitting (s key)  -- (여기 아래는 이전 코드 그대로)
+    # Fitting (s key)
     # ============================================================
     @staticmethod
     def _safe_float(x, default=None):
@@ -719,9 +894,13 @@ class WheelchairTracker:
         qr = self._safe_float(rear.get("quality"), None)
         ql = self._safe_float(left.get("quality"), None)
 
+        tr = self._safe_float(rear.get("tilt_deg"), None)
+        tl = self._safe_float(left.get("tilt_deg"), None)
+
         seen_r = bool(rear.get("seen", False))
         seen_l = bool(left.get("seen", False))
 
+        # build d if missing
         if d is None:
             if seen_r and seen_l and (dr is not None) and (dl is not None):
                 wr = (qr if qr is not None else 0.5)
@@ -735,16 +914,21 @@ class WheelchairTracker:
             elif seen_l and (dl is not None):
                 d = dl
 
-        q = 0.5
         qs = []
         if qr is not None: qs.append(qr)
         if ql is not None: qs.append(ql)
-        if qs:
-            q = float(np.clip(float(np.mean(qs)), 0.05, 1.0))
+        q = float(np.clip(float(np.mean(qs)) if qs else 0.5, 0.05, 1.0))
+
+        # tilt(view) factor
+        vs = []
+        if tr is not None: vs.append(self.tilt_view_weight(tr))
+        if tl is not None: vs.append(self.tilt_view_weight(tl))
+        v = float(np.mean(vs)) if vs else 1.0
+
         cams_seen = int(seen_r) + int(seen_l)
         cam_factor = 1.0 if cams_seen == 2 else (0.7 if cams_seen == 1 else 0.2)
 
-        return d, q * cam_factor, cams_seen
+        return d, q * v * cam_factor, cams_seen
 
     def _wls_ridge_prior(self, X: np.ndarray, y: np.ndarray, w: np.ndarray, lam: float, theta0: np.ndarray):
         W = w.reshape(-1, 1)
@@ -757,13 +941,19 @@ class WheelchairTracker:
         except np.linalg.LinAlgError:
             return np.linalg.lstsq(A, b, rcond=None)[0]
 
-    def _fit_affine_distance(self, center_samples: list, prior: CalibModel):
-        X_list, Yx, Yy, W = [], [], [], []
+    def _phi_row(self, d: float, theta: float) -> List[float]:
+        d = float(d)
+        c = math.cos(float(theta))
+        s = math.sin(float(theta))
+        return [1.0, d, c, s, d * c, d * s]
 
+    def _fit_pos_delta(self, center_samples: list, prior: CalibModel):
+        X_list, Ydx, Ydy, W = [], [], [], []
         for s in center_samples:
             clicked = s.get("clicked_xy", None)
             rawc = s.get("raw_center", None)
-            if clicked is None or rawc is None:
+            theta = self._safe_float(s.get("raw_heading"), None)
+            if clicked is None or rawc is None or theta is None:
                 continue
 
             d, wq, _ = self._sample_quality_and_d(s)
@@ -773,139 +963,134 @@ class WheelchairTracker:
             x, y = float(rawc[0]), float(rawc[1])
             x_star, y_star = float(clicked[0]), float(clicked[1])
 
-            X_list.append([x, y, 1.0, d * x, d * y, d])
-            Yx.append(x_star)
-            Yy.append(y_star)
+            X_list.append(self._phi_row(d, theta))
+            Ydx.append(x_star - x)
+            Ydy.append(y_star - y)
             W.append(max(0.02, float(wq)))
 
-        if len(X_list) < 6:
-            return None, {"msg": f"not enough center samples for affine (need>=6, got={len(X_list)})"}
+        if len(X_list) < 8:
+            return None, {"msg": f"not enough center samples (need>=8, got={len(X_list)})"}
 
-        X = np.array(X_list, dtype=np.float64)
-        yx = np.array(Yx, dtype=np.float64)
-        yy = np.array(Yy, dtype=np.float64)
+        X = np.array(X_list, dtype=np.float64)  # (N,6)
+        yx = np.array(Ydx, dtype=np.float64)
+        yy = np.array(Ydy, dtype=np.float64)
         w = np.array(W, dtype=np.float64)
 
-        theta0_x = np.array([
-            float(prior.A0[0, 0]), float(prior.A0[0, 1]), float(prior.b0[0]),
-            float(prior.A1[0, 0]), float(prior.A1[0, 1]), float(prior.b1[0]),
-        ], dtype=np.float64)
-        theta0_y = np.array([
-            float(prior.A0[1, 0]), float(prior.A0[1, 1]), float(prior.b0[1]),
-            float(prior.A1[1, 0]), float(prior.A1[1, 1]), float(prior.b1[1]),
-        ], dtype=np.float64)
+        theta0_x = np.array(prior.bx.tolist(), dtype=np.float64)
+        theta0_y = np.array(prior.by.tolist(), dtype=np.float64)
 
         Wcol = w.reshape(-1, 1)
         XtWX = X.T @ (Wcol * X)
         base = float(np.trace(XtWX) / max(1, X.shape[1]))
         lam = max(1e-6, 1e-3 * base)
 
-        theta_x = self._wls_ridge_prior(X, yx, w, lam, theta0_x)
-        theta_y = self._wls_ridge_prior(X, yy, w, lam, theta0_y)
+        bx = self._wls_ridge_prior(X, yx, w, lam, theta0_x)
+        by = self._wls_ridge_prior(X, yy, w, lam, theta0_y)
 
+        # robust reweight (2 rounds), sigma grows with d
         for _ in range(2):
-            pred_x = X @ theta_x
-            pred_y = X @ theta_y
+            pred_x = X @ bx
+            pred_y = X @ by
             rx = yx - pred_x
             ry = yy - pred_y
             r = np.sqrt(rx * rx + ry * ry)
 
-            d_vals = X[:, 5]
-            sigma = 15.0 + 10.0 * np.clip(d_vals, 0.0, 10.0)
+            d_vals = X[:, 1]
+            sigma = 10.0 + 8.0 * np.clip(d_vals, 0.0, 10.0)  # px
             robust = 1.0 / (1.0 + (r / sigma) ** 2)
             w2 = w * robust
 
-            theta_x = self._wls_ridge_prior(X, yx, w2, lam, theta_x)
-            theta_y = self._wls_ridge_prior(X, yy, w2, lam, theta_y)
+            bx = self._wls_ridge_prior(X, yx, w2, lam, bx)
+            by = self._wls_ridge_prior(X, yy, w2, lam, by)
 
-        A0 = np.array([[theta_x[0], theta_x[1]],
-                       [theta_y[0], theta_y[1]]], dtype=np.float32)
-        A1 = np.array([[theta_x[3], theta_x[4]],
-                       [theta_y[3], theta_y[4]]], dtype=np.float32)
-        b0 = np.array([theta_x[2], theta_y[2]], dtype=np.float32)
-        b1 = np.array([theta_x[5], theta_y[5]], dtype=np.float32)
-
-        pred_x = X @ theta_x
-        pred_y = X @ theta_y
+        pred_x = X @ bx
+        pred_y = X @ by
         rmse = float(np.sqrt(np.mean((yx - pred_x) ** 2 + (yy - pred_y) ** 2)))
 
         info = {"n": int(len(X_list)), "rmse_pos_px": rmse, "lam": lam}
-        return (A0, A1, b0, b1), info
+        return (bx.astype(np.float32), by.astype(np.float32)), info
 
-    def _fit_yaw_distance(self, yaw_samples: list, prior: CalibModel):
-        D_list, Off_list, W_list = [], [], []
-
+    def _fit_yaw_delta(self, yaw_samples: list, prior: CalibModel):
+        X_list, Y, W = [], [], []
         for s in yaw_samples:
+            theta = self._safe_float(s.get("raw_heading"), None)
+            th_star = self._safe_float(s.get("clicked_heading"), None)
+            if theta is None or th_star is None:
+                continue
+
             d, wq, _ = self._sample_quality_and_d(s)
             if d is None:
                 continue
-            th_raw = self._safe_float(s.get("raw_heading"), None)
-            th_star = self._safe_float(s.get("clicked_heading"), None)
-            if th_raw is None or th_star is None:
-                continue
-            off = wrap_pi(float(th_star) - float(th_raw))
-            D_list.append([1.0, float(d)])
-            Off_list.append(float(off))
-            W_list.append(max(0.02, float(wq)))
 
-        if len(D_list) < 2:
-            return None, {"msg": f"not enough yaw samples (need>=2, got={len(D_list)})"}
+            off = wrap_pi(float(th_star) - float(theta))
+            X_list.append(self._phi_row(d, theta))
+            Y.append(float(off))
+            W.append(max(0.02, float(wq)))
 
-        X = np.array(D_list, dtype=np.float64)
-        y = np.array(Off_list, dtype=np.float64)
-        w = np.array(W_list, dtype=np.float64)
+        if len(X_list) < 4:
+            return None, {"msg": f"not enough yaw samples (need>=4, got={len(X_list)})"}
 
-        theta0 = np.array([float(prior.yaw_a), float(prior.yaw_k)], dtype=np.float64)
+        X = np.array(X_list, dtype=np.float64)  # (N,6)
+        y = np.array(Y, dtype=np.float64)
+        w = np.array(W, dtype=np.float64)
+
+        theta0 = np.array(prior.bt.tolist(), dtype=np.float64)
 
         Wcol = w.reshape(-1, 1)
         XtWX = X.T @ (Wcol * X)
         base = float(np.trace(XtWX) / max(1, X.shape[1]))
         lam = max(1e-8, 1e-3 * base)
 
-        theta = self._wls_ridge_prior(X, y, w, lam, theta0)
+        bt = self._wls_ridge_prior(X, y, w, lam, theta0)
 
         for _ in range(2):
-            pred = X @ theta
+            pred = X @ bt
             res = np.array([wrap_pi(float(yi - pi)) for yi, pi in zip(y, pred)], dtype=np.float64)
             d_vals = X[:, 1]
-            sigma = np.deg2rad(8.0 + 5.0 * np.clip(d_vals, 0.0, 10.0))
+            sigma = np.deg2rad(6.0 + 4.0 * np.clip(d_vals, 0.0, 10.0))
             robust = 1.0 / (1.0 + (np.abs(res) / sigma) ** 2)
             w2 = w * robust
-            theta = self._wls_ridge_prior(X, y, w2, lam, theta)
+            bt = self._wls_ridge_prior(X, y, w2, lam, bt)
 
-        pred = X @ theta
+        pred = X @ bt
         res = np.array([wrap_pi(float(yi - pi)) for yi, pi in zip(y, pred)], dtype=np.float64)
         rmse_deg = float(np.sqrt(np.mean(res * res)) * (180.0 / math.pi))
 
-        info = {"n": int(len(D_list)), "rmse_yaw_deg": rmse_deg, "lam": lam}
-        return (float(theta[0]), float(theta[1])), info
+        info = {"n": int(len(X_list)), "rmse_yaw_deg": rmse_deg, "lam": lam}
+        return bt.astype(np.float32), info
 
     def build_next_calib_from_raw(self):
         vN = self.active_version
         vNp1 = vN + 1
 
+        if not self.raw_file_created:
+            print("[FIT] raw file not created yet. Press 'c' or 'a' to collect first.")
+            return False
+
         centers = [s for s in self.raw_samples if s.get("type") == "center"]
         yaws = [s for s in self.raw_samples if s.get("type") == "yaw"]
 
-        pos_fit, pos_info = self._fit_affine_distance(centers, self.calib)
-        yaw_fit, yaw_info = self._fit_yaw_distance(yaws, self.calib)
+        pos_fit, pos_info = self._fit_pos_delta(centers, self.calib)
+        yaw_fit, yaw_info = self._fit_yaw_delta(yaws, self.calib)
 
         if pos_fit is None and yaw_fit is None:
-            print("[FIT] nothing to fit (need center>=6 or yaw>=2).")
+            print("[FIT] nothing to fit (need center>=8 or yaw>=4).")
+            if pos_info: print("  center:", pos_info)
+            if yaw_info: print("  yaw:", yaw_info)
             return False
 
-        A0, A1, b0, b1 = self.calib.A0.copy(), self.calib.A1.copy(), self.calib.b0.copy(), self.calib.b1.copy()
-        yaw_a, yaw_k = self.calib.yaw_a, self.calib.yaw_k
+        bx = self.calib.bx.copy()
+        by = self.calib.by.copy()
+        bt = self.calib.bt.copy()
 
         if pos_fit is not None:
-            A0, A1, b0, b1 = pos_fit
+            bx, by = pos_fit
         if yaw_fit is not None:
-            yaw_a, yaw_k = yaw_fit
+            bt = yaw_fit
 
         new_calib = CalibModel(
             version=vNp1,
-            A0=A0, A1=A1, b0=b0, b1=b1,
-            yaw_a=yaw_a, yaw_k=yaw_k,
+            bx=bx, by=by, bt=bt,
             created_at=time.time(),
             parent_version=vN,
             made_from_raw_version=vN,
@@ -914,103 +1099,70 @@ class WheelchairTracker:
         fit_stats = {"center_fit": pos_info, "yaw_fit": yaw_info}
         params_used = {
             "dist_gain_fixed": 0.90,
-            "model": "p*=(A0+dA1)p+(b0+db1), yaw=a+kd",
-            "robust": "soft IRLS 2 rounds",
+            "model": "p_corr=p_raw+Δ(d,θ), θ_corr=θ_raw+Δθ(d,θ)",
+            "phi": ["1", "d", "cosθ", "sinθ", "dcosθ", "dsinθ"],
+            "robust": "soft IRLS 2 rounds (sigma grows with d)",
+            "note": "NO SMOOTHING in runtime pose; only calib fit uses robust",
         }
         self._save_calib(new_calib, fit_stats=fit_stats, params_used=params_used)
 
         # switch
         self.active_version = vNp1
         self.calib = new_calib
-        self.raw_samples = self._load_or_create_raw(self.active_version)
-        self._flush_raw()
 
-        print(f"[SWITCH] ACTIVE calib_v{self.active_version}.json, RECORD raw_v{self.active_version}.json")
+        # 새로운 버전에서는 raw 파일을 아직 만들지 않음
+        self.raw_samples = []
+        self.raw_file_created = False
+
+        print(f"[SWITCH] ACTIVE calib_v{self.active_version}.json")
+        print(f"         Next raw will be raw_v{self.active_version}.json (created on first c/a)")
         return True
-
-    # ============================================================
-    # ✅ Video read helper (loop)
-    # ============================================================
-    def _read_pair(self):
-        ok0, fr0 = self.cap_rear.read()
-        ok1, fr1 = self.cap_left.read()
-
-        if USE_VIDEO_FILES and LOOP_VIDEO:
-            if not ok0:
-                self.cap_rear.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                ok0, fr0 = self.cap_rear.read()
-            if not ok1:
-                self.cap_left.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                ok1, fr1 = self.cap_left.read()
-
-        return ok0, fr0, ok1, fr1
 
     # ============================================================
     # Main loop
     # ============================================================
     def run(self):
         while True:
-            self.update_from_trackbars()
+            self.frame_idx += 1
 
-            ok0, fr0, ok1, fr1 = self._read_pair()
+            ok0, fr0 = self.cap_rear.read()
+            ok1, fr1 = self.cap_left.read()
             if not ok0 or not ok1:
-                print("[END] input stream ended")
                 break
 
-            dets = []
-            dets += self.estimate_from_frame(fr0, self.cams["rear"])
-            dets += self.estimate_from_frame(fr1, self.cams["left"])
+            dets_all: List[Dict[str, Any]] = []
+            dets_all += self.estimate_from_frame(fr0, self.cams["rear"])
+            dets_all += self.estimate_from_frame(fr1, self.cams["left"])
 
-            # per-cam best
-            cam_best = {"rear": None, "left": None}
-            for d in dets:
+            cam_best: Dict[str, Optional[Dict[str, Any]]] = {"rear": None, "left": None}
+            for d in dets_all:
                 ck = d["cam_key"]
-                if cam_best[ck] is None or d["weight"] > cam_best[ck]["weight"]:
+                if cam_best[ck] is None or float(d["weight"]) > float(cam_best[ck]["weight"]):
                     cam_best[ck] = d
 
-            for ck in ("rear", "left"):
-                if cam_best[ck] is None:
-                    self.latest_cam_obs[ck] = {"seen": False, "ground_m": None, "quality": None}
-                else:
-                    q = float(cam_best[ck]["dbg_quality"]["quality"])
-                    gm = float(cam_best[ck]["dbg_quality"]["ground_m"])
-                    self.latest_cam_obs[ck] = {"seen": True, "ground_m": gm, "quality": q}
-
-            fused = self.fuse(dets)
+            dets_fuse = self._apply_cam_gate_and_hold(cam_best)
+            fused = self.fuse(dets_fuse)
 
             if fused is not None:
                 self.lost_count = 0
                 center_meas, heading_meas, d_fused = fused
-                self.latest_fused_d = d_fused
 
-                self.buf_center.append(center_meas.copy())
-                self.buf_sin.append(math.sin(heading_meas))
-                self.buf_cos.append(math.cos(heading_meas))
+                # NO SMOOTHING: 바로 사용
+                self.raw_center = center_meas.astype(np.float32)
+                self.raw_heading = float(heading_meas)
+                self.is_initialized = True
 
-                robust_center, robust_heading, _ = self._robust_measurement_from_buffer(center_meas, heading_meas)
-
-                if self.is_initialized:
-                    dyaw = abs(wrap_pi(robust_heading - self.raw_heading))
-                    a = self.alpha_fast if math.degrees(dyaw) > self.turn_fast_deg else self.alpha
-                    self.raw_center = self.raw_center * (1.0 - a) + robust_center * a
-                    self.raw_heading = wrap_pi(self.raw_heading + wrap_pi(robust_heading - self.raw_heading) * a)
-                else:
-                    self.raw_center = robust_center
-                    self.raw_heading = robust_heading
-                    self.is_initialized = True
+                # d는 마지막값 유지(없으면 유지)
+                if d_fused is not None:
+                    self.latest_fused_d = float(d_fused)
             else:
-                self.latest_fused_d = None
+                # FREEZE
                 self.lost_count += 1
-                if self.lost_count >= self.lost_reset_frames:
-                    self.buf_center.clear()
-                    self.buf_sin.clear()
-                    self.buf_cos.clear()
-                    self.is_initialized = False
-                    self.lost_count = 0
 
-            # update snapshot
+            # snapshot
             self.latest_raw_center = None if self.raw_center is None else self.raw_center.copy()
             self.latest_raw_heading = float(self.raw_heading)
+
             corr = self.corrected_pose()
             if corr is not None:
                 self.latest_corr_center = corr[0].copy()
@@ -1019,23 +1171,29 @@ class WheelchairTracker:
                 self.latest_corr_center = None
                 self.latest_corr_heading = 0.0
 
-            # draw
+            # draw map
             m = np.ones((self.map_h, self.map_w, 3), dtype=np.uint8) * 15
             self.draw_static_map(m)
 
-            for d in dets:
+            # all detections markers
+            for d in dets_all:
                 mp = tuple(d["marker_pos"].astype(int))
                 cc = tuple(d["center_pos"].astype(int))
                 cv2.circle(m, mp, 4, (0, 255, 255), -1)
                 cv2.circle(m, cc, 3, (255, 180, 0), -1)
-                cv2.putText(m, f"ID{d['marker_id']}/{d['cam_key']}", (mp[0] + 6, mp[1] - 6),
+                tilt = d.get("dbg_quality", {}).get("tilt_deg", None)
+                txt = f"ID{d['marker_id']}/{d['cam_key']}"
+                if tilt is not None:
+                    txt += f" tilt={tilt:.0f}"
+                cv2.putText(m, txt, (mp[0] + 6, mp[1] - 6),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 255), 1, cv2.LINE_AA)
 
+            # ✅ RAW(주황 틀) 표시 제거: CORR만 그림
             if corr is not None:
                 cpos, chead = corr
                 self.draw_wheelchair(m, cpos, chead, color=(0, 255, 0), label=f"CORR v{self.active_version}")
 
-            self.draw_hud(m, dets)
+            self.draw_hud(m, dets_fuse)
 
             mon0 = cv2.resize(fr0, (640, 360))
             mon1 = cv2.resize(fr1, (640, 360))
@@ -1050,21 +1208,18 @@ class WheelchairTracker:
                 self.is_initialized = False
                 self.raw_center = None
                 self.raw_heading = 0.0
-                self.buf_center.clear()
-                self.buf_sin.clear()
-                self.buf_cos.clear()
                 self.lost_count = 0
-                print("[RESET] tracking filter reset (calib unchanged)")
+                print("[RESET] pose reset (calib/versions unchanged)")
 
             if key == ord('c'):
                 self.click_mode = "record_center"
                 self.tmp_yaw_center = None
-                print(f"[MODE] record center -> raw_v{self.active_version}.json")
+                print(f"[MODE] record center -> will write raw_v{self.active_version}.json")
 
             if key == ord('a'):
                 self.click_mode = "record_yaw_center"
                 self.tmp_yaw_center = None
-                print(f"[MODE] record yaw -> raw_v{self.active_version}.json (center then direction)")
+                print(f"[MODE] record yaw -> will write raw_v{self.active_version}.json (center then direction)")
 
             if key == ord('s'):
                 self.build_next_calib_from_raw()
@@ -1074,5 +1229,17 @@ class WheelchairTracker:
         cv2.destroyAllWindows()
 
 
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rear", type=str, default="0", help="rear source: camera index (e.g. 0) or video path")
+    ap.add_argument("--left", type=str, default="1", help="left source: camera index (e.g. 1) or video path")
+    args = ap.parse_args()
+
+    rear_src = _parse_src(args.rear)
+    left_src = _parse_src(args.left)
+
+    WheelchairTracker(rear_src=rear_src, left_src=left_src).run()
+
+
 if __name__ == "__main__":
-    WheelchairTracker().run()
+    main()

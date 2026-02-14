@@ -3,56 +3,65 @@
   "version": 2,
   "parent_version": 1,
   "made_from_raw_version": 1,
-  "created_at": 1770873123.769927,
+  "created_at": 1770886163.407299,
   "dist_gain_fixed": 0.9,
   "model": {
-    "type": "affine_distance",
-    "A0": [
-      [
-        1.0050160884857178,
-        -0.07130775600671768
-      ],
-      [
-        0.03529584780335426,
-        1.0202592611312866
-      ]
+    "type": "delta_linear_d_theta",
+    "phi": [
+      "1",
+      "d",
+      "cos(theta)",
+      "sin(theta)",
+      "d*cos(theta)",
+      "d*sin(theta)"
     ],
-    "A1": [
-      [
-        0.09706065058708191,
-        -0.009996929205954075
-      ],
-      [
-        -0.03621165081858635,
-        0.012078129686415195
-      ]
+    "bx": [
+      13.018047332763672,
+      1.543770432472229,
+      31.779882431030273,
+      1.6291395425796509,
+      -7.987112045288086,
+      -1.7248201370239258
     ],
-    "b0": [
-      -0.0010616964427754283,
-      -0.00048229011008515954
+    "by": [
+      37.78226089477539,
+      -10.095558166503906,
+      6.7485456466674805,
+      10.464221000671387,
+      -1.4562002420425415,
+      -0.39785391092300415
     ],
-    "b1": [
-      -0.00301907816901803,
-      -0.0015452170046046376
-    ],
-    "yaw_a": 0.0,
-    "yaw_k": 0.0
+    "bt": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
   },
   "fit_stats": {
     "center_fit": {
-      "n": 26,
-      "rmse_pos_px": 22.06472707885288,
-      "lam": 25096.355021784882
+      "n": 23,
+      "rmse_pos_px": 22.445298078550735,
+      "lam": 0.014469369026126331
     },
     "yaw_fit": {
-      "msg": "not enough yaw samples (need>=2, got=1)"
+      "msg": "not enough yaw samples (need>=4, got=0)"
     }
   },
   "params_used": {
     "dist_gain_fixed": 0.9,
-    "model": "p*=(A0+dA1)p+(b0+db1), yaw=a+kd",
+    "model": "p_corr=p_raw+Δ(d,θ), θ_corr=θ_raw+Δθ(d,θ)",
+    "phi": [
+      "1",
+      "d",
+      "cosθ",
+      "sinθ",
+      "dcosθ",
+      "dsinθ"
+    ],
     "robust": "soft IRLS 2 rounds (sigma grows with d)",
-    "flicker_fix": "gate(W=5,H=2) + hold(decay=0.8,max_age=12) + stability(N=20,min=0.3)",
-    "freeze_fix": "both-miss freeze + d-hold(max_age=60) + outlier(soft=80.0,hard=220.0)"
+    "note": "NO SMOOTHING in runtime pose; only calib fit uses robust"
   }
 }
