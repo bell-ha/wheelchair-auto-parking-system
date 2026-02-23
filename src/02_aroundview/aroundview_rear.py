@@ -53,7 +53,7 @@ def on_mouse(event, x, y, flags, param):
 
 def run():
     global points
-    cap = cv2.VideoCapture(1) # 카메라 번호 확인
+    cap = cv2.VideoCapture(0) # 카메라 번호 확인
     cv2.namedWindow("REAR SETTING (8 PTS)")
     cv2.setMouseCallback("REAR SETTING (8 PTS)", on_mouse)
     M = None
