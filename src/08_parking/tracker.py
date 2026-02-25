@@ -160,7 +160,7 @@ class PathTracker:
         self.last_action = "STOP"
 
     def compute_action(self, center, current_yaw, look_ahead_dist=40.0):
-        """제어 명령 계산"""
+        """제어 명령 계산 (후진 제거 버전)"""
         # 1. 대기 카운터가 동작 중이면 즉시 STOP 반환
         if self.wait_counter > 0:
             self.wait_counter -= 1
@@ -170,7 +170,7 @@ class PathTracker:
         if self.use_phase_mode or not self.path or len(self.path) < 1:
             return 0.0, 0.0, "NO PATH"
         
-        # 2. 타겟 방향 및 이상적 액션 판별
+        # 2. 타겟 방향 선정 (Look-ahead 방식 적용)
         target_pt = self.path[-1]
         for p in self.path:
             if math.dist(center, p) >= look_ahead_dist:
@@ -182,31 +182,32 @@ class PathTracker:
         yaw_error = math.atan2(math.sin(target_yaw - current_yaw), 
                                math.cos(target_yaw - current_yaw))
 
-        dead_zone = math.radians(10)
-        reverse_zone = math.radians(100)
+        # 3. 액션 판별 (BACKWARD 로직 제거)
+        # 직진이 가능한 허용 각도
+        dead_zone = math.radians(15) 
         
-        if abs(yaw_error) > reverse_zone: ideal_action = "BACKWARD"
-        elif abs(yaw_error) < dead_zone: ideal_action = "FORWARD"
-        elif yaw_error > 0: ideal_action = "TURN LEFT"
-        else: ideal_action = "TURN RIGHT"
+        # [수정] 후진 대신 방향이 많이 틀어지면 회전만 수행
+        if abs(yaw_error) < dead_zone: 
+            ideal_action = "FORWARD"
+        elif yaw_error > 0: 
+            ideal_action = "TURN LEFT"
+        else: 
+            ideal_action = "TURN RIGHT"
 
-        # 3. [핵심] 액션이 변경될 때만 대기 발생 (Trigger Wait)
-        # STOP에서 다른 액션으로 갈 때, 혹은 액션끼리 바뀔 때
+        # 4. 액션 전환 시 대기 처리 (Trigger Wait)
         if ideal_action != self.last_action:
-            # 이전 액션이 STOP이 아니었을 때만 대기 (연속적인 STOP 방지)
             if self.last_action != "STOP":
                 self._trigger_wait()
                 return 0.0, 0.0, "STOP"
 
-        # 4. 최종 명령 확정 및 상태 저장
+        # 5. 최종 명령 확정 및 상태 저장
         self.last_action = ideal_action
         
-        # 액션 매핑
+        # 액션 매핑 (BACKWARD 항목 삭제)
         actions = {
             "FORWARD": (0.2, 0.0),
-            "BACKWARD": (-0.2, 0.0),
-            "TURN LEFT": (0.0, 0.15),
-            "TURN RIGHT": (0.0, -0.15)
+            "TURN LEFT": (0.0, 0.18),  # 제자리 회전 속도를 약간 높임
+            "TURN RIGHT": (0.0, -0.18)
         }
         
         v, w = actions.get(ideal_action, (0.0, 0.0))
