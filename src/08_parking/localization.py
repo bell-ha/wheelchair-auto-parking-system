@@ -253,28 +253,39 @@ class PoseEstimator:
         self.last_det_all = dets
 
         if dets:
+            # 1. 가장 신뢰도 높은 검출 결과의 거리 정보 저장 (오프셋 계산용)
             best = max(dets, key=lambda d: d["weight"])
             self.last_best_ground_m = float(best.get("ground_m", 0.0))
 
-        if dets:
+            # 2. 여러 마커/카메라 데이터의 가중 평균 (중심점 및 각도)
             total_w = sum(d["weight"] for d in dets)
-            center = sum(d["center_pos"] * d["weight"] for d in dets) / total_w
+            # 마커 위치가 아닌, 이미 중심축으로 변환된 center_pos를 평균 냄
+            weighted_center = sum(d["center_pos"] * d["weight"] for d in dets) / total_w
+            
             s = sum(math.sin(d["heading"]) * d["weight"] for d in dets) / total_w
             c = sum(math.cos(d["heading"]) * d["weight"] for d in dets) / total_w
-            heading = math.atan2(s, c)
+            weighted_heading = math.atan2(s, c)
 
+            # 3. 초기화 및 지수 이동 평균(EMA) 필터 적용
             if not self.is_initialized:
-                self.raw_center = center
-                self.raw_heading = heading
+                self.raw_center = weighted_center
+                self.raw_heading = weighted_heading
                 self.is_initialized = True
             else:
-                self.raw_center = self.raw_center * (1 - self.alpha) + center * self.alpha
-                diff = wrap_pi(heading - self.raw_heading)
+                # 위치 필터링: 회전 시 중심점이 튀는 것을 방지
+                self.raw_center = self.raw_center * (1 - self.alpha) + weighted_center * self.alpha
+                # 각도 필터링: 급격한 방향 전환 시의 노이즈 억제
+                diff = wrap_pi(weighted_heading - self.raw_heading)
                 self.raw_heading = wrap_pi(self.raw_heading + diff * self.alpha)
 
-            r = float(self.last_best_ground_m) if self.last_best_ground_m is not None else 0.0
+            # 4. [핵심 수정] 캘리브레이션 오프셋 적용 및 최종값 확정
+            r = float(self.last_best_ground_m)
+            # 거리별 환경 보정값(dx, dy) 가져오기
             dxdy = self._dxdy_for_dist(r)
+            
+            # PathTracker가 사용할 최종 중심 위치 (중심점 + 환경 보정)
             self.marker_pos = self.raw_center + dxdy
+            # 최종 방향각 (필터링된 각도 + 캘리브레이션 각도 오프셋)
             self.heading_angle = wrap_pi(self.raw_heading + self.calib_yaw_offset)
 
         return self.marker_pos, self.heading_angle, self.is_initialized
