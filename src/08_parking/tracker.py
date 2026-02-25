@@ -2,7 +2,7 @@ import numpy as np
 import math
 
 class PathTracker:
-    """경로 추적 및 관리 모듈 (Phase 연동 유지 + 180° 회전 관성 모드)"""
+    """경로 추적 및 관리 모듈 (오류 수정 및 180° 회전 모드 포함)"""
     
     def __init__(self, wc_l, map_scale):
         self.wc_l = wc_l
@@ -11,38 +11,43 @@ class PathTracker:
         self.planner = None
         self.obstacle_checker = None
         
-        # Phase Controller 연동 (오류 방지용 유지)
+        # 외부 인터페이스 유지를 위한 변수들
         self.phase_controller = None
-        self.use_phase_mode = False  # 기본은 A* 모드
+        self.use_phase_mode = False
         
-        # 액션 추적 및 대기 변수
+        # 액션 및 상태 관리
         self.last_action = "STOP"
         self.wait_counter = 0
         self.min_wait_frames = 15
         
-        # 180° 회전 모드 (사각지대 돌파용)
+        # 180° 회전 모드 관련
         self.rotation_mode = False
         self.rotation_direction = None
-        self.rotation_target_marker = 1  # 0번(전방) 포착 중일 때 1번(후방)을 찾으러 돎
-    
+        self.rotation_target_marker = 1  # 0번(전방) 포착 시 1번(후방)을 찾으러 회전
+
     def set_planner(self, planner):
         self.planner = planner
-    
+
     def set_obstacle_checker(self, checker):
         self.obstacle_checker = checker
-    
+
     def set_phase_controller(self, phase_controller):
-        """Phase Controller 설정 (의존성 유지)"""
+        """Phase Controller 설정 (main.py 의존성 유지)"""
         self.phase_controller = phase_controller
-    
+
     def clear_path(self):
+        """경로 초기화"""
         self.path = []
 
+    def get_path(self):
+        """현재 경로 반환 (main.py 시각화 오류 해결용)"""
+        return self.path
+
     def update_path(self, center, heading_angle, goal_pos, sonar_dist_cm=999.0):
-        """경로 업데이트 (Phase 모드 분기 유지)"""
+        """경로 업데이트 및 재계획"""
         if self.use_phase_mode:
             if self.phase_controller:
-                self.path = [] # Phase 모드 시 경로는 비움
+                self.path = []
             else:
                 self.path = [center.tolist(), goal_pos]
             return
@@ -63,7 +68,7 @@ class PathTracker:
                         break
                 if need_replan: break
             
-            # 2. 경로 이탈 판단
+            # 2. 경로 이탈 판단 (50px)
             if not need_replan:
                 min_d = float('inf')
                 for i in range(len(self.path)-1):
@@ -90,28 +95,25 @@ class PathTracker:
         self.last_action = "STOP"
 
     def compute_action(self, center, current_yaw, marker_id=None, look_ahead_dist=40.0):
-        """제어 명령 계산 (Rotation Mode + Phase Mode 지원)"""
-        # 0. 대기 카운터 처리
+        """제어 명령 계산 (Rotation Mode 지원)"""
         if self.wait_counter > 0:
             self.wait_counter -= 1
             return 0.0, 0.0, "STOP"
 
-        # 1. Phase 모드일 경우 처리 (기존 로직 유지)
         if self.use_phase_mode:
-            # 여기서는 외부(main)에서 phase_controller.step()을 호출할 것이므로 
-            # Tracker는 기본적으로 관여하지 않거나 NO PATH 리턴
             return 0.0, 0.0, "PHASE MODE"
 
-        # 2. 180° 회전 모드 (Rotation Mode) 우선 처리
+        # 1. 180° 회전 모드 (Rotation Mode)
         if self.rotation_mode:
+            # 타겟 마커(1번)가 보이면 회전 종료
             if marker_id == self.rotation_target_marker:
-                print(f"✅ 타겟 마커 {self.rotation_target_marker}번 포착 → 회전 모드 종료")
+                print(f"✅ 마커 {self.rotation_target_marker}번 포착 → 회전 모드 종료")
                 self.rotation_mode = False
             else:
                 ideal_action = f"TURN {self.rotation_direction}"
                 w_speed = 0.18 if self.rotation_direction == "LEFT" else -0.18
                 if ideal_action == self.last_action:
-                    return 0.0, w_speed, f"{ideal_action} (ROTATION MODE)"
+                    return 0.0, w_speed, f"{ideal_action} (ROTATION)"
                 else:
                     if self.last_action != "STOP":
                         self._trigger_wait()
@@ -119,11 +121,10 @@ class PathTracker:
                     self.last_action = ideal_action
                     return 0.0, w_speed, ideal_action
 
-        # 3. 일반 A* 주행 모드
+        # 2. 일반 주행 모드
         if center is None or not self.path or len(self.path) < 1:
             return 0.0, 0.0, "NO PATH"
 
-        # 타겟 선정
         target_pt = self.path[-1]
         for p in self.path:
             if math.dist(center, p) >= look_ahead_dist:
@@ -135,8 +136,8 @@ class PathTracker:
         yaw_error = math.atan2(math.sin(target_yaw - current_yaw), 
                                math.cos(target_yaw - current_yaw))
 
-        # 4. 회전 모드 진입 조건 판단
-        # 0번(전방) 마커를 보고 있는데 가야 할 곳이 뒤쪽(90도 이상)일 때
+        # 3. 회전 모드 진입 판정
+        # 전방 마커(0번)만 보이고 목표가 뒤쪽(90도 초과)일 때
         if marker_id == 0 and abs(yaw_error) > math.radians(90):
             print(f"🔄 180° 회전 모드 시작 (0번 → 1번 탐색)")
             self.rotation_mode = True
@@ -147,7 +148,7 @@ class PathTracker:
                 return 0.0, 0.0, "STOP"
             return 0.0, 0.0, "WAIT ROTATION"
 
-        # 5. 일반 액션 (FORWARD / TURN)
+        # 4. 일반 액션 판별
         dead_zone = math.radians(15)
         if abs(yaw_error) < dead_zone:
             ideal_action = "FORWARD"
