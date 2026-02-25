@@ -95,7 +95,7 @@ class PathTracker:
         self.last_action = "STOP"
 
     def compute_action(self, center, current_yaw, marker_id=None, look_ahead_dist=40.0):
-        """제어 명령 계산 (Rotation Mode 지원)"""
+        """제어 명령 계산 (180° 진동 오류 및 마커 타입 오류 수정)"""
         if self.wait_counter > 0:
             self.wait_counter -= 1
             return 0.0, 0.0, "STOP"
@@ -103,10 +103,14 @@ class PathTracker:
         if self.use_phase_mode:
             return 0.0, 0.0, "PHASE MODE"
 
+        # [수정 1] 마커 ID 안전하게 추출 (배열 형태로 들어올 경우 대비)
+        m_id = None
+        if marker_id is not None:
+            m_id = int(marker_id[0]) if isinstance(marker_id, (list, np.ndarray)) else int(marker_id)
+
         # 1. 180° 회전 모드 (Rotation Mode)
         if self.rotation_mode:
-            # 타겟 마커(1번)가 보이면 회전 종료
-            if marker_id == self.rotation_target_marker:
+            if m_id == self.rotation_target_marker:
                 print(f"✅ 마커 {self.rotation_target_marker}번 포착 → 회전 모드 종료")
                 self.rotation_mode = False
             else:
@@ -137,8 +141,8 @@ class PathTracker:
                                math.cos(target_yaw - current_yaw))
 
         # 3. 회전 모드 진입 판정
-        # 전방 마커(0번)만 보이고 목표가 뒤쪽(90도 초과)일 때
-        if marker_id == 0 and abs(yaw_error) > math.radians(90):
+        # [수정 2] 안전하게 변환된 m_id 사용
+        if m_id == 0 and abs(yaw_error) > math.radians(90):
             print(f"🔄 180° 회전 모드 시작 (0번 → 1번 탐색)")
             self.rotation_mode = True
             self.rotation_direction = "LEFT" if yaw_error > 0 else "RIGHT"
@@ -146,16 +150,26 @@ class PathTracker:
             if self.last_action != "STOP":
                 self._trigger_wait()
                 return 0.0, 0.0, "STOP"
+            
+            # [수정 3] WAIT 상태 돌입 시 last_action을 업데이트하여 상태 꼬임 방지
+            self.last_action = "STOP"
             return 0.0, 0.0, "WAIT ROTATION"
 
         # 4. 일반 액션 판별
         dead_zone = math.radians(15)
         if abs(yaw_error) < dead_zone:
             ideal_action = "FORWARD"
-        elif yaw_error > 0:
-            ideal_action = "TURN LEFT"
         else:
-            ideal_action = "TURN RIGHT"
+            # [수정 4] 180도 부근에서 좌우 진동(Oscillation) 방지용 방향 고정 로직
+            if abs(yaw_error) > math.radians(160):
+                ideal_action = "TURN LEFT" if yaw_error > 0 else "TURN RIGHT"
+                # 이전 액션이 회전이었다면, 각도가 반전되더라도 이전 회전 방향을 강제 유지
+                if self.last_action in ["TURN LEFT", "TURN RIGHT"]:
+                    ideal_action = self.last_action
+            elif yaw_error > 0:
+                ideal_action = "TURN LEFT"
+            else:
+                ideal_action = "TURN RIGHT"
 
         if ideal_action != self.last_action:
             if self.last_action != "STOP":
