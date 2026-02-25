@@ -11,14 +11,16 @@ class PathTracker:
         self.path = []
         self.planner = None  # 외부에서 설정
         self.obstacle_checker = None  # 외부에서 설정
-        self.phase_controller = None  # Phase Controller
-        self.use_phase_mode = True  # True: Phase 모드, False: A* 모드
-        self.obstacle_detected = False  # 장애물 감지 플래그
         
         # 액션 추적 변수
         self.last_action = "STOP"
         self.wait_counter = 0
-        self.min_wait_frames = 15  # 명령 전환 전 정지할 프레임 수 (약 0.15~0.2초)
+        self.min_wait_frames = 15  # 명령 전환 전 정지할 프레임 수
+        
+        # 180° 회전 모드 상태
+        self.rotation_mode = False  # 180° 회전 중인지 여부
+        self.rotation_direction = None  # "LEFT" 또는 "RIGHT"
+        self.rotation_target_marker = None  # 찾아야 할 마커 ID (1번)
     
     def set_planner(self, planner):
         """경로 계획기 설정"""
@@ -28,54 +30,13 @@ class PathTracker:
         """장애물 검사 함수 설정"""
         self.obstacle_checker = checker
     
-    def set_phase_controller(self, phase_controller):
-        """Phase Controller 설정"""
-        self.phase_controller = phase_controller
-    
     def clear_path(self):
         """경로 초기화"""
         self.path = []
     
-    def check_obstacles_in_corridor(self, center, goal_pos, corridor_width=100):
-        """
-        현재 위치에서 목표까지 직선 경로상의 장애물 체크
-        
-        Args:
-            center: 현재 위치 [x, y]
-            goal_pos: 목표 위치 [x, y]
-            corridor_width: 경로 폭 (픽셀)
-        
-        Returns:
-            bool: 장애물이 있으면 True
-        """
-        if not self.obstacle_checker:
-            return False
-        
-        # 시작점과 목표점 사이를 샘플링하여 장애물 체크
-        num_samples = 50
-        for i in range(num_samples + 1):
-            t = i / num_samples
-            check_pt = center * (1 - t) + np.array(goal_pos) * t
-            
-            # 경로 주변 폭도 체크 (좌우로 corridor_width/2 만큼)
-            for offset in range(-corridor_width//2, corridor_width//2, 10):
-                # 경로에 수직인 방향으로 오프셋 적용
-                dx = goal_pos[0] - center[0]
-                dy = goal_pos[1] - center[1]
-                length = math.sqrt(dx**2 + dy**2)
-                if length > 0:
-                    perp_x = -dy / length * offset
-                    perp_y = dx / length * offset
-                    test_pt = check_pt + np.array([perp_x, perp_y])
-                    
-                    if self.obstacle_checker(test_pt[0], test_pt[1]):
-                        return True
-        
-        return False
-    
     def update_path(self, center, heading_angle, goal_pos, sonar_dist_cm=999.0):
         """
-        경로 업데이트 및 재계획
+        경로 업데이트 및 재계획 (원본 스타일 복원)
         
         Args:
             center: 휠체어 중심 위치 [x, y]
@@ -83,18 +44,6 @@ class PathTracker:
             goal_pos: 목표 위치 [x, y]
             sonar_dist_cm: 초음파 거리 (cm)
         """
-        # === Phase 모드 (수동 전환 방식) ===
-        if self.use_phase_mode:
-            # Phase Controller가 있으면 사용
-            if self.phase_controller:
-                # Phase Controller는 속도 명령을 반환하므로 경로는 비움
-                self.path = []
-            else:
-                # Phase Controller 없으면 단순 직선 경로
-                self.path = [center.tolist(), goal_pos]
-            return
-        
-        # === A* 모드 (장애물 있을 때) ===
         need_replan = False
         
         if not self.path or len(self.path) < 2:
@@ -159,15 +108,65 @@ class PathTracker:
         self.wait_counter = frames if frames is not None else self.min_wait_frames
         self.last_action = "STOP"
 
-    def compute_action(self, center, current_yaw, look_ahead_dist=40.0):
-        """제어 명령 계산 (후진 제거 + 180° 회전 모드)"""
+    def compute_action(self, center, current_yaw, marker_id=1, look_ahead_dist=40.0):
+        """
+        제어 명령 계산 (180° 회전 모드 포함)
+        
+        Args:
+            center: 휠체어 중심 위치 (마커 기준 계산된 값, None이면 마커 미감지)
+            current_yaw: 현재 방향각 (라디안)
+            marker_id: 감지된 마커 ID (0=전방, 1=후방, None=미감지)
+            look_ahead_dist: Look-ahead 거리
+        """
         # 1. 대기 카운터가 동작 중이면 즉시 STOP 반환
         if self.wait_counter > 0:
             self.wait_counter -= 1
             return 0.0, 0.0, "STOP"
 
-        # A* 모드가 아니거나 경로가 없으면 정지
-        if self.use_phase_mode or not self.path or len(self.path) < 1:
+        # ──────────────────────────────────────────────────────────
+        # 180° 회전 모드가 활성화되어 있으면 마커 없어도 계속 회전
+        # ──────────────────────────────────────────────────────────
+        if self.rotation_mode:
+            # 목표 마커(1번)가 보이면 회전 모드 종료
+            if marker_id == self.rotation_target_marker:
+                print(f"✅ 마커 {self.rotation_target_marker}번 포착 → 회전 모드 종료")
+                self.rotation_mode = False
+                self.rotation_direction = None
+                self.rotation_target_marker = None
+                # 정상 경로 추적으로 전환
+            else:
+                # 목표 마커가 아직 안 보이면 계속 같은 방향으로 회전
+                if self.rotation_direction == "LEFT":
+                    ideal_action = "TURN LEFT"
+                else:
+                    ideal_action = "TURN RIGHT"
+                
+                # 같은 방향이면 대기 없이 계속 회전
+                if ideal_action == self.last_action:
+                    self.last_action = ideal_action
+                    actions = {
+                        "TURN LEFT": (0.0, 0.18),
+                        "TURN RIGHT": (0.0, -0.18)
+                    }
+                    v, w = actions.get(ideal_action, (0.0, 0.0))
+                    return v, w, f"{ideal_action} (ROTATION MODE)"
+                else:
+                    # 방향 전환은 대기 필요
+                    if self.last_action != "STOP":
+                        self._trigger_wait()
+                        return 0.0, 0.0, "STOP"
+                    self.last_action = ideal_action
+                    actions = {
+                        "TURN LEFT": (0.0, 0.18),
+                        "TURN RIGHT": (0.0, -0.18)
+                    }
+                    v, w = actions.get(ideal_action, (0.0, 0.0))
+                    return v, w, f"{ideal_action} (ROTATION MODE)"
+
+        # ──────────────────────────────────────────────────────────
+        # 일반 모드: 경로가 없거나 마커가 없으면 정지
+        # ──────────────────────────────────────────────────────────
+        if center is None or not self.path or len(self.path) < 1:
             return 0.0, 0.0, "NO PATH"
         
         # 2. 타겟 방향 선정 (Look-ahead 방식 적용)
@@ -179,28 +178,39 @@ class PathTracker:
 
         dx, dy = target_pt[0] - center[0], target_pt[1] - center[1]
         target_yaw = math.atan2(dy, dx)
-        yaw_error = math.atan2(math.sin(target_yaw - current_yaw), 
-                               math.cos(target_yaw - current_yaw))
+        
+        # ── 마커 ID 기반 yaw 보정 ──────────────────────────────
+        # 마커 0번(전방)이 보이면 실제 heading은 current_yaw + 180°
+        if marker_id == 0:
+            actual_yaw = current_yaw + math.pi
+        else:
+            actual_yaw = current_yaw
+        
+        yaw_error = math.atan2(math.sin(target_yaw - actual_yaw), 
+                               math.cos(target_yaw - actual_yaw))
 
         # 3. 180° 회전 모드 판단
-        # 목표가 현재 방향의 반대편(±90° 초과)에 있으면 회전만 수행
-        need_180_turn = abs(yaw_error) > math.radians(90)
-        
-        # 4. 액션 판별
-        dead_zone = math.radians(15)  # 직진 허용 각도
+        # 마커 0번이 보이고 목표가 반대편(±90° 초과)에 있으면 회전 모드 진입
+        need_180_turn = (marker_id == 0) and (abs(yaw_error) > math.radians(90))
         
         if need_180_turn:
-            # 180° 회전 모드: 반대편을 보도록 계속 회전 (전진 금지)
-            if yaw_error > 0:
+            # 180° 회전 모드 진입
+            print(f"🔄 180° 회전 모드 진입 (마커 0번 → 마커 1번 찾기)")
+            self.rotation_mode = True
+            self.rotation_target_marker = 1
+            self.rotation_direction = "LEFT" if yaw_error > 0 else "RIGHT"
+            
+            ideal_action = f"TURN {self.rotation_direction}"
+        else:
+            # 4. 일반 액션 판별
+            dead_zone = math.radians(15)  # 직진 허용 각도
+            
+            if abs(yaw_error) < dead_zone:
+                ideal_action = "FORWARD"
+            elif yaw_error > 0:
                 ideal_action = "TURN LEFT"
             else:
                 ideal_action = "TURN RIGHT"
-        elif abs(yaw_error) < dead_zone:
-            ideal_action = "FORWARD"
-        elif yaw_error > 0:
-            ideal_action = "TURN LEFT"
-        else:
-            ideal_action = "TURN RIGHT"
 
         # 5. 액션 전환 시 대기 처리
         if ideal_action != self.last_action:
