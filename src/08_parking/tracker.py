@@ -160,17 +160,16 @@ class PathTracker:
         self.last_action = "STOP"
 
     def compute_action(self, center, current_yaw, look_ahead_dist=40.0):
-        """제어 명령 계산 (후진 제거 버전)"""
-        # 1. 대기 카운터가 동작 중이면 즉시 STOP 반환
+        """제어 명령 계산 (회전 방향 고정 및 발작 방지 로직)"""
+        # 1. 대기 카운터 처리
         if self.wait_counter > 0:
             self.wait_counter -= 1
             return 0.0, 0.0, "STOP"
 
-        # A* 모드가 아니거나 경로가 없으면 정지
         if self.use_phase_mode or not self.path or len(self.path) < 1:
             return 0.0, 0.0, "NO PATH"
         
-        # 2. 타겟 방향 선정 (Look-ahead 방식 적용)
+        # 2. 타겟 방향 선정
         target_pt = self.path[-1]
         for p in self.path:
             if math.dist(center, p) >= look_ahead_dist:
@@ -182,31 +181,36 @@ class PathTracker:
         yaw_error = math.atan2(math.sin(target_yaw - current_yaw), 
                                math.cos(target_yaw - current_yaw))
 
-        # 3. 액션 판별 (BACKWARD 로직 제거)
-        # 직진이 가능한 허용 각도
-        dead_zone = math.radians(25) 
+        # 3. 액션 판별 및 회전 방향 고정 (Hysteresis)
+        dead_zone = math.radians(25)
         
-        # [수정] 후진 대신 방향이 많이 틀어지면 회전만 수행
-        if abs(yaw_error) < dead_zone: 
+        # [핵심 수정] 현재 회전 중이고 에러가 아직 클 때는 이전 회전 방향을 고수함
+        if abs(yaw_error) < dead_zone:
             ideal_action = "FORWARD"
-        elif yaw_error > 0: 
-            ideal_action = "TURN LEFT"
-        else: 
-            ideal_action = "TURN RIGHT"
+        else:
+            # 이미 회전 중이었다면, 에러가 어느 정도(예: 45도) 줄어들 때까지 방향 전환 금지
+            if self.last_action == "TURN LEFT" and yaw_error < math.radians(-10):
+                # 에러가 반대로 넘어갔더라도 미세한 차이라면 기존 방향 유지
+                ideal_action = "TURN LEFT"
+            elif self.last_action == "TURN RIGHT" and yaw_error > math.radians(10):
+                ideal_action = "TURN RIGHT"
+            else:
+                # 새로 방향을 정해야 하는 상황
+                ideal_action = "TURN LEFT" if yaw_error > 0 else "TURN RIGHT"
 
-        # 4. 액션 전환 시 대기 처리 (Trigger Wait)
+        # 4. 액션 전환 시 대기 처리
         if ideal_action != self.last_action:
+            # [추가] 회전 방향이 LEFT <-> RIGHT로 급격히 바뀔 때만 STOP 발생
+            # 혹은 FORWARD <-> TURN 전환 시 발생
             if self.last_action != "STOP":
                 self._trigger_wait()
                 return 0.0, 0.0, "STOP"
 
-        # 5. 최종 명령 확정 및 상태 저장
+        # 5. 최종 명령 확정
         self.last_action = ideal_action
-        
-        # 액션 매핑 (BACKWARD 항목 삭제)
         actions = {
             "FORWARD": (0.2, 0.0),
-            "TURN LEFT": (0.0, 0.18),  # 제자리 회전 속도를 약간 높임
+            "TURN LEFT": (0.0, 0.18),
             "TURN RIGHT": (0.0, -0.18)
         }
         
