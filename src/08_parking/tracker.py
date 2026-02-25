@@ -160,7 +160,7 @@ class PathTracker:
         self.last_action = "STOP"
 
     def compute_action(self, center, current_yaw, look_ahead_dist=40.0):
-        """제어 명령 계산 (후진 제거 버전)"""
+        """제어 명령 계산 (후진 제거 + 180° 회전 모드)"""
         # 1. 대기 카운터가 동작 중이면 즉시 STOP 반환
         if self.wait_counter > 0:
             self.wait_counter -= 1
@@ -182,31 +182,39 @@ class PathTracker:
         yaw_error = math.atan2(math.sin(target_yaw - current_yaw), 
                                math.cos(target_yaw - current_yaw))
 
-        # 3. 액션 판별 (BACKWARD 로직 제거)
-        # 직진이 가능한 허용 각도
-        dead_zone = math.radians(15) 
+        # 3. 180° 회전 모드 판단
+        # 목표가 현재 방향의 반대편(±90° 초과)에 있으면 회전만 수행
+        need_180_turn = abs(yaw_error) > math.radians(90)
         
-        # [수정] 후진 대신 방향이 많이 틀어지면 회전만 수행
-        if abs(yaw_error) < dead_zone: 
+        # 4. 액션 판별
+        dead_zone = math.radians(15)  # 직진 허용 각도
+        
+        if need_180_turn:
+            # 180° 회전 모드: 반대편을 보도록 계속 회전 (전진 금지)
+            if yaw_error > 0:
+                ideal_action = "TURN LEFT"
+            else:
+                ideal_action = "TURN RIGHT"
+        elif abs(yaw_error) < dead_zone:
             ideal_action = "FORWARD"
-        elif yaw_error > 0: 
+        elif yaw_error > 0:
             ideal_action = "TURN LEFT"
-        else: 
+        else:
             ideal_action = "TURN RIGHT"
 
-        # 4. 액션 전환 시 대기 처리 (Trigger Wait)
+        # 5. 액션 전환 시 대기 처리
         if ideal_action != self.last_action:
             if self.last_action != "STOP":
                 self._trigger_wait()
                 return 0.0, 0.0, "STOP"
 
-        # 5. 최종 명령 확정 및 상태 저장
+        # 6. 최종 명령 확정 및 상태 저장
         self.last_action = ideal_action
         
-        # 액션 매핑 (BACKWARD 항목 삭제)
+        # 액션 매핑 (3가지만)
         actions = {
             "FORWARD": (0.2, 0.0),
-            "TURN LEFT": (0.0, 0.18),  # 제자리 회전 속도를 약간 높임
+            "TURN LEFT": (0.0, 0.18),
             "TURN RIGHT": (0.0, -0.18)
         }
         
