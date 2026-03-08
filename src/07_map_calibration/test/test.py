@@ -1,650 +1,467 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# teleop_v31_kf_per_camera_4points_with_hide.py
+# dual_rear_jitter_aware_viewer.py
 #
-# 요구사항:
-# - 4점만 표시:
-#     rear_before (PnP only)
-#     rear_after  (v3.1 measurement -> rear Kalman filter output)
-#     left_before (PnP only)
-#     left_after  (v3.1 measurement -> left Kalman filter output)
+# 역할 분리:
+#   ID0 (83cm, 상단) → 주 위치 추정
+#   ID1 (53cm, 하단) → jittering 감지용
 #
-# - 카메라가 오래 못 보면(Timeout) / 끊긴 뒤 너무 많이 이동하면(Distance gate)
-#   해당 카메라의 "after(KF)"를 화면에서 숨김
-#   (다시 마커 잡히면 바로 나타남)
+# 동작:
+#   ID0만 보임           → quality=1.0 으로 KF update
+#   ID0+ID1 둘 다 보임   → 두 추정값 위치 차이 계산
+#                            차이 < JITTER_THRESH_CM  → 정상, quality=1.2 (두 마커 동의)
+#                            차이 >= JITTER_THRESH_CM → jittering, quality=0.3
+#   ID1만 보임           → ID0 없으므로 quality=0.5 로 KF update (신뢰도 낮음)
+#   둘 다 없음           → KF predict만
 #
-# - 조종:
-#   OpenCV MAP 창 포커스에서 WASD/Space/X/Q
-#   UDP send 부호는 control.py 방식 유지:
-#     A=+w, D=-w
-#   KF 예측에서는 화면 회전 방향 정렬을 위해 w만 부호 반전:
-#     w_kf = -(w_send)/1000 [rad/s]
+#   rear 카메라 우선: rear quality *= 1.5, left quality *= 0.7
+#   3초 이상 미검출 → 화살표 숨김
 #
-# Requires:
-#   analyze/calib_params_ridge.csv
+# 키: Q/ESC=종료   [/] = jitter 임계값 조절
 
-import json, socket, time, math, csv
+import math, time
 from dataclasses import dataclass
-from pathlib import Path
 
 import cv2
 import numpy as np
 
 # =======================
-# USER SETTINGS
+# SETTINGS
 # =======================
-SERVER_IP = "172.25.244.144"
-SERVER_PORT = 25001
+DIST_GAIN_FIXED   = 0.90
+CENTER_OFFSET_CM  = 23.0
+MARKER_H_CM       = {0: 83.0, 1: 53.0}
+HIDE_TIMEOUT_S    = 3.0
+JITTER_THRESH_CM  = 15.0   # [ / ] 키로 조절
 
-SEND_HZ = 30
-FWD_MM_S = 200
-REV_MM_S = -200
-YAW_MRAD_S = 300
-
-CALIB_CSV = "analyze/calib_params_ridge.csv"
-DIST_GAIN_FIXED = 0.90
+CAM_TRUST = {"rear": 1.5, "left": 0.7}   # rear 카메라 신뢰 배율
 
 # =======================
-# HIDE POLICY (핵심)
+# ArUco Board 오브젝트 포인트
 # =======================
-# 마커가 이 시간 이상 안 보이면 after(KF) 숨김
-HIDE_TIMEOUT_S = 2.0
-# 마지막으로 마커가 보였던 위치에서 이 거리(cm) 이상 벗어나면 after(KF) 숨김
-HIDE_MAX_DRIFT_CM = 300.0
+MARKER_SIZE_M = 0.25
+HALF          = MARKER_SIZE_M / 2
+ID1_Y         = -(MARKER_H_CM[0] - MARKER_H_CM[1]) / 100.0   # -0.30m
 
+def _corners(cx, cy):
+    return np.array([
+        [cx-HALF, cy+HALF, 0.],
+        [cx+HALF, cy+HALF, 0.],
+        [cx+HALF, cy-HALF, 0.],
+        [cx-HALF, cy-HALF, 0.],
+    ], dtype=np.float32)
 
-# =========================
-# UDP helper (never crash)
-# =========================
-def udp_send(sock, addr, payload: dict) -> bool:
-    try:
-        sock.sendto(json.dumps(payload).encode("utf-8"), addr)
-        return True
-    except OSError:
-        return False
+BOARD_OBJ = {
+    0: _corners(0., 0.),      # 주 추정용
+    1: _corners(0., ID1_Y),   # jitter 감지용
+}
 
+aruco_dict   = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_250)
+aruco_params = cv2.aruco.DetectorParameters()
+detector     = cv2.aruco.ArucoDetector(aruco_dict, aruco_params)
 
-# =========================
+# =======================
 # Camera intrinsics
-# =========================
-K = np.array([[601.71923257, 0.0, 630.47700714],
-              [0.0, 601.34529853, 367.21223657],
-              [0.0, 0.0, 1.0]], dtype=np.float32)
+# =======================
+K = np.array([[601.71923257, 0.,          630.47700714],
+              [0.,          601.34529853, 367.21223657],
+              [0.,          0.,           1.          ]], dtype=np.float32)
 D = np.array([-0.18495647, 0.02541005, -0.01068433, 0.00321714], dtype=np.float32)
 
-# =========================
-# ArUco / PnP
-# =========================
-MARKER_SIZE_M = 0.25
-OBJ_POINTS = np.array([
-    [-MARKER_SIZE_M / 2,  MARKER_SIZE_M / 2, 0],
-    [ MARKER_SIZE_M / 2,  MARKER_SIZE_M / 2, 0],
-    [ MARKER_SIZE_M / 2, -MARKER_SIZE_M / 2, 0],
-    [-MARKER_SIZE_M / 2, -MARKER_SIZE_M / 2, 0]
-], dtype=np.float32)
+# =======================
+# Helpers
+# =======================
+def wrap360(d):
+    d = d % 360.
+    return d + 360. if d < 0 else d
 
-aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_250)
-aruco_params = cv2.aruco.DetectorParameters()
-detector = cv2.aruco.ArucoDetector(aruco_dict, aruco_params)
+def wrap_pi(r):
+    return (r + math.pi) % (2*math.pi) - math.pi
 
-# =========================
-# Angle helpers
-# =========================
-def wrap360(deg: float) -> float:
-    deg = deg % 360.0
-    return deg + 360.0 if deg < 0 else deg
+def compass_to_map(deg):
+    return math.radians((deg + 270.) % 360.)
 
-def wrap180(deg: float) -> float:
-    return (deg + 180.0) % 360.0 - 180.0
-
-def wrap_pi(rad: float) -> float:
-    return (rad + math.pi) % (2 * math.pi) - math.pi
-
-def compass_deg_to_map_rad(compass_deg: float) -> float:
-    # compass: 0=N,90=E -> map: 0=+x, 90=+y(down)
-    mdeg = (compass_deg + 270.0) % 360.0
-    return math.radians(mdeg)
-
-def map_deg_to_south0_deg(map_deg: float) -> float:
-    return wrap360(map_deg - 90.0)
-
-def south0_deg_to_map_deg(south0_deg: float) -> float:
-    return wrap360(south0_deg + 90.0)
-
-def view_sym_from_rel(rel_deg: float) -> float:
-    a = abs(rel_deg)
-    return float(min(a, abs(180.0 - a)))  # 0~90
-
-
-# =========================
-# Config
-# =========================
+# =======================
+# CamCfg
+# =======================
 @dataclass
 class CamCfg:
-    key: str
-    index: int
-    pos_world_px: np.ndarray
-    h_cm: float
-    map_angle_deg: float
-    sens: float
-    install_angle: float
+    key:            str
+    index:          int
+    pos_world_px:   np.ndarray
+    h_cm:           float
+    map_angle_deg:  float
+    sens:           float
+    install_angle:  float
     install_offset: float
-    yaw_trim_deg: float = 0.0
-    dist_gain: float = DIST_GAIN_FIXED
+    yaw_trim_deg:   float = 0.
+    dist_gain:      float = DIST_GAIN_FIXED
 
+# =======================
+# 단일 마커 PnP (역할 구분용)
+# =======================
+def single_marker_pnp(corners_i, cam: CamCfg, marker_id: int):
+    """마커 하나로 위치·방향 추정. 반환: (center_world, heading_rad, reproj) or None"""
+    und = cv2.fisheye.undistortPoints(
+        corners_i.reshape(-1,1,2), K, D, P=K
+    ).reshape(-1,2).astype(np.float32)
 
-# =========================
-# v3.1 runtime
-# =========================
-FEAT_KEYS = ["bias", "g", "g2", "b", "b2", "v", "g*b", "reproj"]
+    ok, rvec, tvec = cv2.solvePnP(
+        BOARD_OBJ[marker_id], und, K, None,
+        flags=cv2.SOLVEPNP_ITERATIVE
+    )
+    if not ok:
+        return None
+    tvec = tvec.reshape(3).astype(np.float32)
+    if float(tvec[2]) <= 0.01:
+        return None
 
-def rayvec_from_south0(ray_ang_south0_deg: float):
-    map_deg = south0_deg_to_map_deg(ray_ang_south0_deg)
-    r = math.radians(map_deg)
-    return math.cos(r), math.sin(r)
+    dist_m    = float(np.linalg.norm(tvec))
+    dh_m      = abs(cam.h_cm - MARKER_H_CM[marker_id]) / 100.
+    ground_m  = math.sqrt(max(0., dist_m**2 - dh_m**2))
+    ground_cm = ground_m * 100. * cam.dist_gain
 
-def from_ray_frame(e_par, e_perp, ray_ang_south0_deg):
-    ux, uy = rayvec_from_south0(ray_ang_south0_deg)
-    vx, vy = -uy, ux
-    dx = e_par * ux + e_perp * vx
-    dy = e_par * uy + e_perp * vy
-    return dx, dy
+    bearing = math.degrees(math.atan2(float(tvec[0]), float(tvec[2])))
+    ray_rad = math.radians(cam.map_angle_deg + cam.yaw_trim_deg + bearing)
 
-def X_v3(ground_m, bearing_deg, view_sym_deg, reproj):
-    g = float(ground_m)              # meters
-    b = abs(float(bearing_deg))      # degrees
-    v = float(view_sym_deg)          # degrees
-    r = float(reproj)                # pixels
-    return np.array([1.0, g, g*g, b, b*b, v, g*b, r], dtype=float)
+    mw = cam.pos_world_px + np.array([
+        ground_cm * math.cos(ray_rad),
+        ground_cm * math.sin(ray_rad),
+    ], dtype=np.float32)
 
-def load_calib_params_v31(csv_path: str | Path):
-    csv_path = Path(csv_path)
-    if not csv_path.exists():
-        raise FileNotFoundError(f"Missing v3.1 params CSV: {csv_path}")
-    params = {}
-    with csv_path.open("r", newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            cam = row["cam"].strip().lower()
-            def get(prefix):
-                return np.array([float(row[f"{prefix}{k}"]) for k in FEAT_KEYS], dtype=float)
-            wpar = get("wpar_")
-            wper = get("wper_")
-            wtheta = None
-            if f"wtheta_{FEAT_KEYS[0]}" in row:
-                wtheta = get("wtheta_")
-            params[cam] = (wpar, wper, wtheta)
-    return params
+    rmat, _ = cv2.Rodrigues(rvec)
+    sy  = math.sqrt(rmat[0,0]**2 + rmat[1,0]**2)
+    yaw = math.degrees(math.atan2(-rmat[2,0], sy))
+    yc  = wrap360((yaw * cam.sens) + cam.install_angle
+                  - cam.install_offset + 180.)
+    hdg = compass_to_map(yc)
 
-def apply_v31(cam_key: str, params, *,
-              pred_x, pred_y, pred_ang_south0_deg,
-              ground_m, bearing_deg, ray_ang_south0_deg,
-              view_sym_deg, reproj):
-    cam_key = cam_key.lower()
-    if cam_key not in params:
-        return float(pred_x), float(pred_y), float(pred_ang_south0_deg)
+    center = mw + np.array([
+        CENTER_OFFSET_CM * math.cos(hdg),
+        CENTER_OFFSET_CM * math.sin(hdg),
+    ], dtype=np.float32)
 
-    wpar, wper, wtheta = params[cam_key]
-    X = X_v3(ground_m, bearing_deg, view_sym_deg, reproj)
+    proj, _ = cv2.projectPoints(BOARD_OBJ[marker_id], rvec, tvec, K, None)
+    reproj   = float(np.mean(np.linalg.norm(
+        proj.reshape(-1,2) - und, axis=1)))
 
-    epar = float(X @ wpar)
-    eper = float(X @ wper)
-    dx, dy = from_ray_frame(epar, eper, ray_ang_south0_deg)
+    return {"center": center, "heading": hdg, "reproj": reproj}
 
-    x2 = float(pred_x) + dx
-    y2 = float(pred_y) + dy
+# =======================
+# 프레임에서 ID0/ID1 각각 추정
+# =======================
+def estimate_frame(frame_bgr, cam: CamCfg):
+    """반환: {"id0": ..., "id1": ...}  각각 None 가능"""
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    corners, ids, _ = detector.detectMarkers(gray)
+    result = {"id0": None, "id1": None}
+    if ids is None:
+        return result
+    for i, mid_arr in enumerate(ids):
+        mid = int(mid_arr[0])
+        if mid not in (0, 1):
+            continue
+        est = single_marker_pnp(corners[i], cam, mid)
+        if est is None:
+            continue
+        key = "id0" if mid == 0 else "id1"
+        # 같은 ID 여러 개 검출 시 reproj 낮은 것 선택
+        if result[key] is None or est["reproj"] < result[key]["reproj"]:
+            result[key] = est
+    return result
 
-    ang2 = float(pred_ang_south0_deg)
-    if wtheta is not None:
-        dth = float(X @ wtheta)
-        ang2 = wrap360(ang2 + dth)
-    return x2, y2, ang2
+# =======================
+# jitter 감지 + quality 결정
+# =======================
+def assess_quality(id0_est, id1_est, jitter_thresh_cm, cam_key):
+    """
+    id0 기반 추정값과 quality를 반환.
+    id0 없으면 id1 폴백.
+    """
+    cam_mul = CAM_TRUST[cam_key]
 
+    if id0_est is None and id1_est is None:
+        return None, "없음", False
 
-# =========================
-# Camera-wise KF + visibility gate
-# =========================
-class CamKF:
+    if id0_est is None:
+        # ID1만 보임 → 신뢰도 낮음
+        return id1_est, "ID1만", False, 0.5 * cam_mul
+
+    if id1_est is None:
+        # ID0만 보임 → 정상
+        return id0_est, "ID0만", False, 1.0 * cam_mul
+
+    # 둘 다 보임 → 위치 차이로 jitter 판단
+    dx = float(id0_est["center"][0]) - float(id1_est["center"][0])
+    dy = float(id0_est["center"][1]) - float(id1_est["center"][1])
+    dist_cm = math.hypot(dx, dy)
+
+    if dist_cm < jitter_thresh_cm:
+        # 두 마커 동의 → 신뢰도 높음
+        return id0_est, f"동의({dist_cm:.0f}cm)", False, 1.2 * cam_mul
+    else:
+        # jittering 의심 → quality 낮춤
+        return id0_est, f"jitter({dist_cm:.0f}cm)", True, 0.3 * cam_mul
+
+# =======================
+# Kalman Filter [x, y, θ, vx, vy, vθ]
+# =======================
+class RobotKF:
     def __init__(self):
-        self.x = np.zeros((3, 1), dtype=float)
-        self.P = np.diag([60.0**2, 60.0**2, (20.0 * math.pi/180)**2]).astype(float)
+        self.x  = np.zeros((6,1), dtype=float)
+        self.P  = np.diag([100.**2, 100.**2,
+                           (30.*math.pi/180)**2,
+                           50.**2, 50.**2,
+                           (20.*math.pi/180)**2]).astype(float)
         self.initialized = False
+        self.last_seen   = None
 
-        self.q_xy = 10.0
-        self.q_th = 12.0 * math.pi/180
-        self.r_xy = 25.0
-        self.r_th = 15.0 * math.pi/180
+        self.q_xy = 5.0;  self.q_th  = 8.*math.pi/180
+        self.q_v  = 20.0; self.q_vth = 15.*math.pi/180
+        self.r_xy = 15.0; self.r_th  = 10.*math.pi/180
 
-        # visibility gate state
-        self.last_seen_t = None
-        self.last_seen_pos = None  # np.array([x,y])
-        self.visible = False
-
-    def init_from_meas(self, mx, my, mth, now):
-        self.x[:] = np.array([[mx], [my], [wrap_pi(mth)]], dtype=float)
-        self.P[:] = np.diag([25.0**2, 25.0**2, (10.0 * math.pi/180)**2]).astype(float)
-        self.initialized = True
-        self.last_seen_t = now
-        self.last_seen_pos = np.array([mx, my], dtype=float)
-        self.visible = True
-
-    def predict(self, v_cm_s, w_rad_s, dt):
-        if dt <= 0.0 or (not self.initialized):
+    def predict(self, dt):
+        if not self.initialized or dt <= 0:
             return
-
-        x = float(self.x[0, 0]); y = float(self.x[1, 0]); th = float(self.x[2, 0])
-        x2 = x + v_cm_s * dt * math.cos(th)
-        y2 = y + v_cm_s * dt * math.sin(th)
-        th2 = wrap_pi(th + w_rad_s * dt)
-        self.x[:] = np.array([[x2], [y2], [th2]], dtype=float)
-
-        F = np.eye(3, dtype=float)
-        F[0, 2] = -v_cm_s * dt * math.sin(th)
-        F[1, 2] =  v_cm_s * dt * math.cos(th)
-
-        Q = np.diag([(self.q_xy**2)*dt, (self.q_xy**2)*dt, (self.q_th**2)*dt]).astype(float)
+        dt = min(dt, 0.5)
+        x,y,th,vx,vy,vth = [float(v) for v in self.x.flatten()]
+        self.x = np.array([[x+vx*dt],[y+vy*dt],[wrap_pi(th+vth*dt)],
+                            [vx],[vy],[vth]], dtype=float)
+        F = np.eye(6); F[0,3]=dt; F[1,4]=dt; F[2,5]=dt
+        Q = np.diag([(self.q_xy**2)*dt]*2 + [(self.q_th**2)*dt] +
+                    [(self.q_v**2)*dt]*2   + [(self.q_vth**2)*dt])
         self.P = F @ self.P @ F.T + Q
 
-    def update(self, mx, my, mth, now, quality_scale=1.0):
+    def update(self, cx, cy, cth, now, quality=1.0):
+        z = np.array([[cx],[cy],[wrap_pi(cth)]], dtype=float)
+        H = np.zeros((3,6)); H[0,0]=H[1,1]=H[2,2]=1.
+        R = np.diag([(self.r_xy/quality)**2]*2 + [(self.r_th/quality)**2])
         if not self.initialized:
-            self.init_from_meas(mx, my, mth, now)
-            return
-
-        z = np.array([[mx], [my], [wrap_pi(mth)]], dtype=float)
-        H = np.eye(3, dtype=float)
-        R = np.diag([(self.r_xy*quality_scale)**2, (self.r_xy*quality_scale)**2, (self.r_th*quality_scale)**2]).astype(float)
-
-        y = z - self.x
-        y[2, 0] = wrap_pi(float(y[2, 0]))
-
-        S = H @ self.P @ H.T + R
-        K = self.P @ H.T @ np.linalg.inv(S)
-
-        self.x = self.x + K @ y
-        self.x[2, 0] = wrap_pi(float(self.x[2, 0]))
-        self.P = (np.eye(3, dtype=float) - K @ H) @ self.P
-
-        # update last seen info
-        self.last_seen_t = now
-        self.last_seen_pos = np.array([mx, my], dtype=float)
-        self.visible = True
-
-    def refresh_visibility(self, now, timeout_s, max_d_cm):
-        if self.last_seen_t is None or (not self.initialized):
-            self.visible = False
-            return
-
-        if (now - self.last_seen_t) > timeout_s:
-            self.visible = False
-            return
-
-        if self.last_seen_pos is not None:
-            x, y, _ = self.get()
-            dx = x - float(self.last_seen_pos[0])
-            dy = y - float(self.last_seen_pos[1])
-            if math.hypot(dx, dy) > max_d_cm:
-                self.visible = False
-                return
-
-        self.visible = True
+            self.x[0,0]=cx; self.x[1,0]=cy; self.x[2,0]=wrap_pi(cth)
+            self.P = np.diag([25.**2,25.**2,(8.*math.pi/180)**2,
+                               40.**2,40.**2,(12.*math.pi/180)**2])
+            self.initialized = True
+        else:
+            inn = z - H @ self.x
+            inn[2,0] = wrap_pi(float(inn[2,0]))
+            S  = H @ self.P @ H.T + R
+            Kg = self.P @ H.T @ np.linalg.inv(S)
+            self.x = self.x + Kg @ inn
+            self.x[2,0] = wrap_pi(float(self.x[2,0]))
+            self.P = (np.eye(6) - Kg @ H) @ self.P
+        self.last_seen = now
 
     def get(self):
-        return float(self.x[0, 0]), float(self.x[1, 0]), float(self.x[2, 0])
+        return float(self.x[0,0]), float(self.x[1,0]), float(self.x[2,0])
 
+    def is_visible(self, now):
+        if not self.initialized or self.last_seen is None:
+            return False
+        return (now - self.last_seen) < HIDE_TIMEOUT_S
 
-# =========================
+# =======================
 # App
-# =========================
+# =======================
 class App:
     def __init__(self):
-        # canvas
         self.canvas_w, self.canvas_h = 2000, 2000
         self.draw_off_x, self.draw_off_y = 700, 500
-
-        # coordinate alignment
-        self.grid_world_origin = np.array([200.0, 150.0], dtype=np.float32)
+        self.grid_world_origin = np.array([200., 150.], dtype=np.float32)
         self.grid_w, self.grid_h = 600, 720
-        gx, gy = float(self.grid_world_origin[0]), float(self.grid_world_origin[1])
-        self.car_zone_world = ((200 + gx, 180 + gy), (400 + gx, 540 + gy))
+        gx,gy = float(self.grid_world_origin[0]), float(self.grid_world_origin[1])
+        self.car_zone_world = ((200+gx,180+gy),(400+gx,540+gy))
 
-        # marker geometry
-        self.marker_h_cm_by_id = {0: 70.0, 1: 70.0}
-        self.marker_h_cm_default = 70.0
-        self.center_offset_cm_by_id = {0: 23.0, 1: 23.0}
-
-        # cams
-        rear_base = np.array([301.4, 540.0], dtype=np.float32)
-        left_base = np.array([200.0, 270.0], dtype=np.float32)
         self.cams = {
-            "rear": CamCfg("rear", 0, rear_base + self.grid_world_origin, 105.5, 90.0, 1.6, 0.0, 0.0, yaw_trim_deg=3.0, dist_gain=DIST_GAIN_FIXED),
-            "left": CamCfg("left", 1, left_base + self.grid_world_origin, 110.0, 157.0, 1.6, 113.0, 50.84, yaw_trim_deg=8.0, dist_gain=DIST_GAIN_FIXED),
+            "rear": CamCfg("rear",0,
+                np.array([301.4,540.],np.float32)+self.grid_world_origin,
+                h_cm=105.5, map_angle_deg=90., sens=1.6,
+                install_angle=0., install_offset=0., yaw_trim_deg=3.),
+            "left": CamCfg("left",1,
+                np.array([200.,270.],np.float32)+self.grid_world_origin,
+                h_cm=110., map_angle_deg=157., sens=1.6,
+                install_angle=113., install_offset=50.84, yaw_trim_deg=8.),
         }
 
-        # v3.1
-        self.params_v31 = load_calib_params_v31(CALIB_CSV)
-        print("[LOAD] v3.1 params:", list(self.params_v31.keys()))
-        print("[INFO] dist_gain fixed =", DIST_GAIN_FIXED)
-        print("[INFO] hide policy: timeout=%.1fs  drift=%.0fcm" % (HIDE_TIMEOUT_S, HIDE_MAX_DRIFT_CM))
+        self.kf           = RobotKF()
+        self.last_t       = time.time()
+        self.jitter_thresh = JITTER_THRESH_CM
 
-        # cameras
         self.cap0 = cv2.VideoCapture(self.cams["rear"].index)
         self.cap1 = cv2.VideoCapture(self.cams["left"].index)
         if not self.cap0.isOpened() or not self.cap1.isOpened():
-            raise RuntimeError("Camera open failed. index(0/1) 확인")
+            raise RuntimeError("Camera open failed")
 
-        # UDP
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.addr = (SERVER_IP, SERVER_PORT)
-        self.udp_ok = True
-        self.last_udp_err_t = 0.0
-
-        # teleop
-        self.v_mm_s = 0
-        self.w_mrad_s = 0
-        self.last_key = "STOP"
-        self.last_send = 0.0
-        self.dt_send = 1.0 / float(SEND_HZ)
-
-        # per-camera KF
-        self.kf_rear = CamKF()
-        self.kf_left = CamKF()
-
-        self.last_t = time.time()
-
-        # windows
-        self.win_map = "MAP | 4 points + hide-after policy"
-        self.win_mon = "MONITOR (rear|left)"
-        cv2.namedWindow(self.win_map, cv2.WINDOW_NORMAL)
-        cv2.namedWindow(self.win_mon, cv2.WINDOW_NORMAL)
+        cv2.namedWindow("MAP | jitter-aware KF", cv2.WINDOW_NORMAL)
+        cv2.namedWindow("MONITOR", cv2.WINDOW_NORMAL)
+        print(f"[INFO] jitter_thresh={self.jitter_thresh}cm  [ / ] 키로 조절")
 
     def close(self):
-        try:
-            udp_send(self.sock, self.addr, {"stop": True})
-        except Exception:
-            pass
-        try:
-            self.sock.close()
-        except Exception:
-            pass
-        try:
-            self.cap0.release()
-            self.cap1.release()
-        except Exception:
-            pass
+        for c in (self.cap0, self.cap1):
+            try: c.release()
+            except: pass
         cv2.destroyAllWindows()
 
-    def w2c(self, p_world: np.ndarray) -> np.ndarray:
-        return p_world + np.array([self.draw_off_x, self.draw_off_y], dtype=np.float32)
+    def w2c(self, p):
+        return p + np.array([self.draw_off_x, self.draw_off_y], np.float32)
 
-    def marker_to_center_world(self, marker_pos_world: np.ndarray, heading_map_rad: float, marker_id: int) -> np.ndarray:
-        offset_cm = float(self.center_offset_cm_by_id.get(marker_id, 23.0))
-        dx = offset_cm * math.cos(heading_map_rad)
-        dy = offset_cm * math.sin(heading_map_rad)
-        sign = -1.0 if marker_id == 0 else +1.0
-        return marker_pos_world + np.array([sign * dx, sign * dy], dtype=np.float32)
-
-    def estimate_before_and_v31(self, frame_bgr, cam: CamCfg):
-        """
-        Returns:
-          before: (center_world, heading_map)
-          meas_v31: (center_world, heading_map)  # v3.1 output (measurement for KF)
-        """
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = detector.detectMarkers(gray)
-        if ids is None:
-            return None
-
-        H, W = frame_bgr.shape[:2]
-        best, best_score = None, -1.0
-
-        for i, mid_arr in enumerate(ids):
-            mid = int(mid_arr[0])
-            if mid not in (0, 1):
-                continue
-
-            und = cv2.fisheye.undistortPoints(corners[i].reshape(-1, 1, 2), K, D, P=K)
-            ok, rvec, tvec = cv2.solvePnP(OBJ_POINTS, und, K, None, flags=cv2.SOLVEPNP_ITERATIVE)
-            if not ok:
-                continue
-
-            tvec = tvec.reshape(3).astype(np.float32)
-            if float(tvec[2]) <= 0.01:
-                continue
-
-            dist_m = float(np.linalg.norm(tvec))
-            mh = float(self.marker_h_cm_by_id.get(mid, self.marker_h_cm_default))
-            dh_m = abs(cam.h_cm - mh) / 100.0
-            ground_m = math.sqrt(max(0.0, dist_m * dist_m - dh_m * dh_m))
-            ground_cm = ground_m * 100.0 * cam.dist_gain
-
-            bearing_deg = math.degrees(math.atan2(float(tvec[0]), float(tvec[2])))
-
-            ray_deg_map = cam.map_angle_deg + cam.yaw_trim_deg + bearing_deg
-            ray_rad_map = math.radians(ray_deg_map)
-
-            marker_world = cam.pos_world_px + np.array([
-                ground_cm * math.cos(ray_rad_map),
-                ground_cm * math.sin(ray_rad_map)
-            ], dtype=np.float32)
-
-            # yaw -> compass -> heading map rad
-            rmat, _ = cv2.Rodrigues(rvec)
-            sy = math.sqrt(rmat[0, 0] ** 2 + rmat[1, 0] ** 2)
-            raw_yaw_deg = math.degrees(math.atan2(-rmat[2, 0], sy))
-
-            total = (raw_yaw_deg * cam.sens) + cam.install_angle
-            yaw_compass = total - cam.install_offset
-            yaw_compass = wrap360(yaw_compass + 180.0) if mid == 1 else wrap360(yaw_compass)
-            heading_before_map = compass_deg_to_map_rad(yaw_compass)
-
-            center_before = self.marker_to_center_world(marker_world, heading_before_map, mid)
-
-            # reproj
-            proj, _ = cv2.projectPoints(OBJ_POINTS, rvec, tvec, K, None)
-            proj = proj.reshape(-1, 2).astype(np.float32)
-            reproj_err = float(np.mean(np.linalg.norm(
-                proj - und.reshape(-1, 2).astype(np.float32), axis=1
-            )))
-
-            # v3.1 inputs
-            heading_before_map_deg = wrap360(math.degrees(heading_before_map))
-            pred_ang_before_south0 = map_deg_to_south0_deg(heading_before_map_deg)
-            ray_ang_south0 = map_deg_to_south0_deg(wrap360(ray_deg_map))
-            view_rel_deg = wrap180(pred_ang_before_south0 - ray_ang_south0)
-            view_sym_deg = view_sym_from_rel(view_rel_deg)
-
-            x2, y2, ang2_south0 = apply_v31(
-                cam.key, self.params_v31,
-                pred_x=float(center_before[0]),
-                pred_y=float(center_before[1]),
-                pred_ang_south0_deg=float(pred_ang_before_south0),
-                ground_m=float(ground_m),
-                bearing_deg=float(bearing_deg),
-                ray_ang_south0_deg=float(ray_ang_south0),
-                view_sym_deg=float(view_sym_deg),
-                reproj=float(reproj_err),
-            )
-            center_v31 = np.array([x2, y2], dtype=np.float32)
-            heading_v31_map = math.radians(south0_deg_to_map_deg(ang2_south0))
-
-            # best marker selection
-            cx = float(np.mean(corners[i].reshape(4, 2)[:, 0]))
-            rel_x = (cx - W / 2) / (W / 2)
-            score = (1.0 - abs(rel_x)) * (1.0 / (1.0 + ground_m))
-
-            if score > best_score:
-                best_score = score
-                best = {
-                    "before_center": center_before,
-                    "before_heading": float(heading_before_map),
-                    "meas_center": center_v31,
-                    "meas_heading": float(heading_v31_map),
-                }
-
-        return best
-
-    # ---- UI drawing ----
-    def draw_grid(self, img, x0, y0, w, h, step, col_minor, col_major, major_step):
-        for x in range(0, w + 1, step):
-            col = col_major if (x % major_step) == 0 else col_minor
-            cv2.line(img, (x0 + x, y0), (x0 + x, y0 + h), col, 1)
-        for y in range(0, h + 1, step):
-            col = col_major if (y % major_step) == 0 else col_minor
-            cv2.line(img, (x0, y0 + y), (x0 + w, y0 + y), col, 1)
+    def draw_grid(self, img, x0,y0,w,h,s,cm,cM,ms):
+        for x in range(0,w+1,s):
+            cv2.line(img,(x0+x,y0),(x0+x,y0+h),cM if x%ms==0 else cm,1)
+        for y in range(0,h+1,s):
+            cv2.line(img,(x0,y0+y),(x0+w,y0+y),cM if y%ms==0 else cm,1)
 
     def draw_static(self, canvas):
-        step, major = 20, 100
-        self.draw_grid(canvas, 0, 0, self.canvas_w - 1, self.canvas_h - 1, step, (25, 25, 25), (45, 45, 45), major)
+        self.draw_grid(canvas,0,0,self.canvas_w-1,self.canvas_h-1,
+                       20,(25,25,25),(45,45,45),100)
+        g0=self.w2c(self.grid_world_origin).astype(int)
+        gx,gy=int(g0[0]),int(g0[1])
+        self.draw_grid(canvas,gx,gy,self.grid_w,self.grid_h,
+                       20,(45,45,45),(80,80,80),100)
+        cv2.rectangle(canvas,(gx,gy),(gx+self.grid_w,gy+self.grid_h),(200,200,200),2)
+        x0w,y0w=self.car_zone_world[0]; x1w,y1w=self.car_zone_world[1]
+        cv2.rectangle(canvas,
+            tuple(self.w2c(np.array([x0w,y0w],np.float32)).astype(int)),
+            tuple(self.w2c(np.array([x1w,y1w],np.float32)).astype(int)),
+            (35,35,45),-1)
+        for key,cam in self.cams.items():
+            cp=self.w2c(cam.pos_world_px).astype(int)
+            cv2.circle(canvas,tuple(cp),6,(220,220,220),-1)
+            cv2.putText(canvas,key,(int(cp[0])+8,int(cp[1])-8),
+                        0,0.5,(220,220,220),1,cv2.LINE_AA)
 
-        g0 = self.w2c(self.grid_world_origin).astype(int)
-        gx, gy = int(g0[0]), int(g0[1])
-        self.draw_grid(canvas, gx, gy, self.grid_w, self.grid_h, step, (45, 45, 45), (80, 80, 80), major)
-        cv2.rectangle(canvas, (gx, gy), (gx + self.grid_w, gy + self.grid_h), (200, 200, 200), 2)
-
-        (x0w, y0w), (x1w, y1w) = self.car_zone_world
-        p0 = self.w2c(np.array([x0w, y0w], np.float32)).astype(int)
-        p1 = self.w2c(np.array([x1w, y1w], np.float32)).astype(int)
-        cv2.rectangle(canvas, tuple(p0), tuple(p1), (35, 35, 45), -1)
-
-        for key, cam in self.cams.items():
-            cp = self.w2c(cam.pos_world_px).astype(int)
-            cv2.circle(canvas, tuple(cp), 6, (220, 220, 220), -1)
-            cv2.putText(canvas, key, (int(cp[0]) + 8, int(cp[1]) - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1, cv2.LINE_AA)
-
-    def draw_pose(self, canvas, center_world, heading_map_rad, color, label, radius, thickness, arrow_len_cm):
-        c = self.w2c(center_world).astype(int)
-        cv2.circle(canvas, tuple(c), radius, color, -1)
-        end_world = center_world + np.array([arrow_len_cm * math.cos(heading_map_rad),
-                                             arrow_len_cm * math.sin(heading_map_rad)], dtype=np.float32)
-        e = self.w2c(end_world).astype(int)
-        cv2.arrowedLine(canvas, tuple(c), tuple(e), color, thickness, cv2.LINE_AA, tipLength=0.25)
-        cv2.putText(canvas, label, (int(c[0]) + 10, int(c[1]) + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
-
-    # ---- control mapping (control.py 유지) ----
-    def handle_key(self, k: int):
-        if k == ord('w'):
-            self.v_mm_s, self.w_mrad_s = FWD_MM_S, 0
-            self.last_key = "W"
-        elif k == ord('s'):
-            self.v_mm_s, self.w_mrad_s = REV_MM_S, 0
-            self.last_key = "S"
-        elif k == ord('a'):
-            self.v_mm_s, self.w_mrad_s = 0, +YAW_MRAD_S
-            self.last_key = "A"
-        elif k == ord('d'):
-            self.v_mm_s, self.w_mrad_s = 0, -YAW_MRAD_S
-            self.last_key = "D"
-        elif k == ord('x') or k == 32:
-            self.v_mm_s, self.w_mrad_s = 0, 0
-            self.last_key = "STOP"
-            self.udp_ok = udp_send(self.sock, self.addr, {"stop": True})
-
-    def maybe_send(self):
-        now = time.time()
-        if (now - self.last_send) >= self.dt_send:
-            ok = udp_send(self.sock, self.addr, {"v": int(self.v_mm_s), "w": int(self.w_mrad_s)})
-            self.udp_ok = ok
-            if (not ok) and (now - self.last_udp_err_t > 1.0):
-                print(f"[WARN] UDP send failed (Host down?): {self.addr}")
-                self.last_udp_err_t = now
-            self.last_send = now
+    def draw_arrow(self, canvas, center, heading, color, label, r, t, alen):
+        c=self.w2c(center).astype(int)
+        cv2.circle(canvas,tuple(c),r,color,-1)
+        e=self.w2c(center+np.array([alen*math.cos(heading),
+                                     alen*math.sin(heading)],np.float32)).astype(int)
+        cv2.arrowedLine(canvas,tuple(c),tuple(e),color,t,cv2.LINE_AA,tipLength=0.22)
+        cv2.putText(canvas,label,(int(c[0])+10,int(c[1])+5),
+                    0,0.48,color,2,cv2.LINE_AA)
 
     def run(self):
+        COL_ROBOT   = (  0, 255, 255)   # 최종 ROBOT (굵음)
+        COL_REAR_ID0= ( 80,  80, 180)   # rear id0 raw
+        COL_REAR_ID1= ( 80, 160,  80)   # rear id1 raw
+        COL_LEFT_ID0= ( 40,  40, 120)   # left id0 raw (더 흐리게)
+        COL_JITTER  = (  0,  80, 255)   # jitter 경고색
+        MON_W, MON_H = 640, 360
+
+        def make_mon(ok, fr):
+            if not ok or fr is None:
+                return np.zeros((MON_H,MON_W,3),np.uint8)
+            mon = cv2.resize(fr,(MON_W,MON_H))
+            gray = cv2.cvtColor(fr,cv2.COLOR_BGR2GRAY)
+            corners,ids,_ = detector.detectMarkers(gray)
+            if ids is not None and len(corners)>0:
+                sx,sy = MON_W/fr.shape[1], MON_H/fr.shape[0]
+                scaled = [(c.reshape(-1,1,2)*[sx,sy]).astype(np.float32)
+                          for c in corners]
+                cv2.aruco.drawDetectedMarkers(mon,scaled,ids)
+            return mon
+
         try:
             while True:
                 now = time.time()
-                dt = now - self.last_t
+                dt  = min(now - self.last_t, 0.5)
                 self.last_t = now
-                dt = max(0.0, min(dt, 0.2))
 
-                # predict both KFs from command
-                v_cm_s = self.v_mm_s / 10.0
-                w_rad_s_send = (self.w_mrad_s / 1000.0)
-                w_rad_s_kf = -w_rad_s_send  # 화면 방향 맞춤용 반전
+                ok0,fr0 = self.cap0.read()
+                ok1,fr1 = self.cap1.read()
 
-                self.kf_rear.predict(v_cm_s, w_rad_s_kf, dt)
-                self.kf_left.predict(v_cm_s, w_rad_s_kf, dt)
+                rear_f = estimate_frame(fr0, self.cams["rear"]) \
+                         if (ok0 and fr0 is not None) else {"id0":None,"id1":None}
+                left_f = estimate_frame(fr1, self.cams["left"]) \
+                         if (ok1 and fr1 is not None) else {"id0":None,"id1":None}
 
-                ok0, fr0 = self.cap0.read()
-                ok1, fr1 = self.cap1.read()
+                # quality 평가
+                rear_res = assess_quality(rear_f["id0"], rear_f["id1"],
+                                          self.jitter_thresh, "rear")
+                left_res = assess_quality(left_f["id0"], left_f["id1"],
+                                          self.jitter_thresh, "left")
+                # assess_quality 반환: (est, status_str, is_jitter, quality)
+                # 없음인 경우 3-tuple이므로 처리
+                def unpack(res):
+                    if len(res) == 3:   # 없음
+                        return None, res[1], False, 0.
+                    return res
 
-                rear = self.estimate_before_and_v31(fr0, self.cams["rear"]) if (ok0 and fr0 is not None) else None
-                left = self.estimate_before_and_v31(fr1, self.cams["left"]) if (ok1 and fr1 is not None) else None
+                rear_est, rear_status, rear_jit, rear_q = unpack(rear_res)
+                left_est, left_status, left_jit, left_q = unpack(left_res)
 
-                # update each KF with its own measurement
-                if rear is not None:
-                    mx, my = float(rear["meas_center"][0]), float(rear["meas_center"][1])
-                    mth = float(rear["meas_heading"])
-                    self.kf_rear.update(mx, my, mth, now)
+                # KF predict (항상)
+                self.kf.predict(dt)
 
-                if left is not None:
-                    mx, my = float(left["meas_center"][0]), float(left["meas_center"][1])
-                    mth = float(left["meas_heading"])
-                    self.kf_left.update(mx, my, mth, now)
+                # 유효한 추정값들로 KF update
+                # rear와 left 중 더 신뢰도 높은 것을 먼저, 낮은 것은 보조
+                updates = [(e,q) for e,q in [(rear_est,rear_q),(left_est,left_q)]
+                           if e is not None and q > 0]
+                for est, q in updates:
+                    self.kf.update(
+                        float(est["center"][0]),
+                        float(est["center"][1]),
+                        float(est["heading"]),
+                        now, quality=q
+                    )
 
-                # refresh visibility gates (hide policy)
-                self.kf_rear.refresh_visibility(now, HIDE_TIMEOUT_S, HIDE_MAX_DRIFT_CM)
-                self.kf_left.refresh_visibility(now, HIDE_TIMEOUT_S, HIDE_MAX_DRIFT_CM)
-
-                # draw
-                canvas = np.ones((self.canvas_h, self.canvas_w, 3), dtype=np.uint8) * 15
+                # ── canvas ──────────────────────────────────
+                canvas = np.ones((self.canvas_h,self.canvas_w,3),dtype=np.uint8)*15
                 self.draw_static(canvas)
 
-                # HUD/Legend
-                cv2.putText(canvas, "Keys: W/A/S/D | Space/X=STOP | Q/ESC=QUIT",
-                            (10, 25), 0, 0.55, (230, 230, 230), 2, cv2.LINE_AA)
-                cv2.putText(canvas, f"CMD(send): v={self.v_mm_s} mm/s, w={self.w_mrad_s} mrad/s (last={self.last_key})",
-                            (10, 55), 0, 0.65, (230, 230, 230), 2, cv2.LINE_AA)
-                cv2.putText(canvas, f"HIDE: timeout={HIDE_TIMEOUT_S:.1f}s, drift>{HIDE_MAX_DRIFT_CM:.0f}cm => after(KF) hidden",
-                            (10, 85), 0, 0.52, (200, 200, 200), 2, cv2.LINE_AA)
-                cv2.putText(canvas, f"UDP: {'OK' if self.udp_ok else 'FAIL'} -> {SERVER_IP}:{SERVER_PORT}",
-                            (10, 110), 0, 0.55, (200, 200, 200), 2, cv2.LINE_AA)
+                visible   = self.kf.is_visible(now)
+                seen_ago  = (now-self.kf.last_seen) if self.kf.last_seen else 999.
+                is_jitter = rear_jit or left_jit
 
-                y0 = 140
-                cv2.putText(canvas, "Legend (4 points; after may hide):", (10, y0), 0, 0.60, (230,230,230), 2, cv2.LINE_AA); y0 += 22
-                cv2.putText(canvas, "rear_before : PnP only (only when seen)", (10, y0), 0, 0.52, (0,140,255), 2, cv2.LINE_AA); y0 += 20
-                cv2.putText(canvas, "rear_after  : v3.1 -> KF (may hide)", (10, y0), 0, 0.52, (0,0,255), 2, cv2.LINE_AA); y0 += 20
-                cv2.putText(canvas, "left_before : PnP only (only when seen)", (10, y0), 0, 0.52, (255,220,0), 2, cv2.LINE_AA); y0 += 20
-                cv2.putText(canvas, "left_after  : v3.1 -> KF (may hide)", (10, y0), 0, 0.52, (0,255,0), 2, cv2.LINE_AA)
+                # HUD
+                jit_col = COL_JITTER if is_jitter else (180,255,180)
+                cv2.putText(canvas,
+                    f"rear: {rear_status}  |  left: {left_status}",
+                    (10,30),0,0.60,(230,230,230),2,cv2.LINE_AA)
+                cv2.putText(canvas,
+                    f"jitter thresh={self.jitter_thresh:.0f}cm  "
+                    f"({'JITTER!' if is_jitter else '정상'})   [ / ] 조절",
+                    (10,58),0,0.55,jit_col,2,cv2.LINE_AA)
+                cv2.putText(canvas,
+                    f"마지막 검출: {seen_ago:.1f}s 전   "
+                    f"화살표: {'표시' if visible else f'숨김(>{HIDE_TIMEOUT_S:.0f}s)'}",
+                    (10,84),0,0.50,(200,200,200),1,cv2.LINE_AA)
+                cv2.putText(canvas,"Q/ESC=종료",
+                    (10,106),0,0.46,(160,160,160),1,cv2.LINE_AA)
 
-                # draw rear_before only if seen
-                if rear is not None:
-                    self.draw_pose(canvas, rear["before_center"], rear["before_heading"],
-                                   (0, 140, 255), "rear_before", 4, 1, 45)
+                # 참고용 raw 포인트 (작게, 흐리게)
+                if rear_f["id0"]:
+                    self.draw_arrow(canvas,
+                        rear_f["id0"]["center"], rear_f["id0"]["heading"],
+                        COL_REAR_ID0, "r_id0", 3, 1, 30)
+                if rear_f["id1"]:
+                    self.draw_arrow(canvas,
+                        rear_f["id1"]["center"], rear_f["id1"]["heading"],
+                        COL_REAR_ID1, "r_id1", 3, 1, 30)
+                if left_f["id0"]:
+                    self.draw_arrow(canvas,
+                        left_f["id0"]["center"], left_f["id0"]["heading"],
+                        COL_LEFT_ID0, "l_id0", 3, 1, 30)
 
-                # draw rear_after if visible (or if just initialized & still visible)
-                if self.kf_rear.visible and self.kf_rear.initialized:
-                    rx, ry, rth = self.kf_rear.get()
-                    self.draw_pose(canvas, np.array([rx, ry], np.float32), rth,
-                                   (0, 0, 255), "rear_after(KF)", 6, 2, 55)
+                # 최종 ROBOT 화살표
+                if visible:
+                    kx,ky,kth = self.kf.get()
+                    arrow_col = COL_JITTER if is_jitter else COL_ROBOT
+                    self.draw_arrow(canvas,
+                        np.array([kx,ky],np.float32), kth,
+                        arrow_col, "ROBOT", 9, 3, 60)
 
-                # draw left_before
-                if left is not None:
-                    self.draw_pose(canvas, left["before_center"], left["before_heading"],
-                                   (255, 220, 0), "left_before", 4, 1, 45)
+                cv2.imshow("MONITOR",
+                           np.hstack([make_mon(ok0,fr0), make_mon(ok1,fr1)]))
+                cv2.imshow("MAP | jitter-aware KF", canvas)
 
-                # draw left_after if visible
-                if self.kf_left.visible and self.kf_left.initialized:
-                    lx, ly, lth = self.kf_left.get()
-                    self.draw_pose(canvas, np.array([lx, ly], np.float32), lth,
-                                   (0, 255, 0), "left_after(KF)", 6, 2, 55)
-
-                # monitor
-                mon0 = cv2.resize(fr0, (640, 360)) if (ok0 and fr0 is not None) else np.zeros((360, 640, 3), np.uint8)
-                mon1 = cv2.resize(fr1, (640, 360)) if (ok1 and fr1 is not None) else np.zeros((360, 640, 3), np.uint8)
-                cv2.imshow(self.win_mon, np.hstack([mon0, mon1]))
-                cv2.imshow(self.win_map, canvas)
-
-                # key
                 k = cv2.waitKey(1) & 0xFF
                 if k in (27, ord('q')):
                     break
-                if k != 255:
-                    self.handle_key(k)
-
-                self.maybe_send()
+                elif k == ord(']'):
+                    self.jitter_thresh = min(self.jitter_thresh + 5., 100.)
+                    print(f"[INFO] jitter_thresh → {self.jitter_thresh:.0f}cm")
+                elif k == ord('['):
+                    self.jitter_thresh = max(self.jitter_thresh - 5., 5.)
+                    print(f"[INFO] jitter_thresh → {self.jitter_thresh:.0f}cm")
 
         except KeyboardInterrupt:
             pass
