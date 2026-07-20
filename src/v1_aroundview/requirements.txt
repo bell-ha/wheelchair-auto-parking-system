@@ -1,0 +1,16 @@
+# ===============================
+# Core numerical & image processing
+# ===============================
+numpy==1.26.4
+opencv-contrib-python==4.9.0.80
+
+# ===============================
+# Visualization / Debug
+# ===============================
+matplotlib
+
+# ===============================
+# Optional (future use)
+# ===============================
+# pillow
+# scipy

@@ -1,1 +1,0 @@
-control.py: wasd /x(정지)로 수동조종

@@ -1,0 +1,5 @@
+train: /Users/jongha/Desktop/휠체어프로젝트/seg_experiment/dataset/train/images
+val: /Users/jongha/Desktop/휠체어프로젝트/seg_experiment/dataset/valid/images
+
+nc: 6
+names: ['car_emblem', 'door_handle', 'fuel_cap', 'license_plate', 'side_mirror', 'tail_light']

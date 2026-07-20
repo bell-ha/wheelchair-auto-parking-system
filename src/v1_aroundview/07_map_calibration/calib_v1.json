@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "version": 1,
+  "parent_version": 0,
+  "made_from_raw_version": 0,
+  "created_at": 1770885978.627418,
+  "dist_gain_fixed": 0.9,
+  "model": {
+    "type": "delta_linear_d_theta",
+    "phi": [
+      "1",
+      "d",
+      "cos(theta)",
+      "sin(theta)",
+      "d*cos(theta)",
+      "d*sin(theta)"
+    ],
+    "bx": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "by": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "bt": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "fit_stats": {
+    "msg": "init zero model"
+  },
+  "params_used": {
+    "model": "delta(d,theta) linear"
+  }
+}

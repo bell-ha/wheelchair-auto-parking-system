@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "calib_version": 2,
+  "updated_at": 1770886418.236553,
+  "samples": [
+    {
+      "type": "yaw",
+      "t": 1770886418.2361531,
+      "clicked_heading": 1.5194130246562914,
+      "raw_heading": 1.5962032520728116,
+      "raw_center": [
+        296.90301513671875,
+        754.7215576171875
+      ],
+      "fused_d": 3.646135293831715,
+      "cam_obs": {
+        "rear": {
+          "seen": false,
+          "active": false,
+          "held": false,
+          "ground_m": null,
+          "quality": null,
+          "stability": 0.3,
+          "tilt_deg": null
+        },
+        "left": {
+          "seen": true,
+          "active": true,
+          "held": false,
+          "ground_m": 3.646135293831715,
+          "quality": 0.3988826315789473,
+          "stability": 1.0,
+          "tilt_deg": 79.27154164638833
+        }
+      }
+    }
+  ]
+}
