@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 6
+names: ['car_emblem', 'door_handle', 'fuel_cap', 'license_plate', 'side_mirror', 'tail_light']
+
+roboflow:
+  workspace: jongha
+  project: ray-labeling
+  version: dataset
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/jongha/ray-labeling/dataset/dataset

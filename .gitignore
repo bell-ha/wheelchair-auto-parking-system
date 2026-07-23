@@ -9,15 +9,10 @@ venv/
 
 # ── 100MB 초과 대용량 파일 (GitHub push 제한으로 제외, 로컬 보관) ──
 # 필요 시 GitHub Release로 공유 (개당 2GB까지 무료)
-src/v2_vision/outputs/레이영상_1_detected_v3.mp4
 src/v2_vision/outputs/레이영상_1_detected_v4.mp4
-src/v2_vision/outputs/레이영상_2_detected_v3.mp4
 src/v2_vision/outputs/레이영상_2_detected_v4.mp4
-src/v2_vision/outputs/레이영상_3_detected_v3.mp4
 src/v2_vision/outputs/distance/레이영상_1_dist.mp4
-src/v2_vision/outputs/distance/레이영상_1_dist_tail.mp4
 src/v2_vision/outputs/distance/레이영상_2_dist.mp4
-src/v2_vision/outputs/distance/레이영상_2_dist_tail.mp4
 src/v2_vision/raw_datasets/Side Mirror.v2-first-version.yolov8.zip
 src/v2_vision/raw_datasets/Fuel Cap.v15i.yolov8.zip
 src/v2_vision/raw_datasets/KIA Logo.v2i.yolov8.zip
@@ -26,4 +21,6 @@ src/v2_vision/kaggle_upload/mirror.bin
 src/v2_vision/kaggle_upload/fuel_cap.bin
 src/v2_vision/kaggle_upload/logo.bin
 src/v2_vision/kaggle_upload/plate_old.bin
-src/v2_vision/seg_experiment/eval/레이영상_1_seg.mp4
+# 라벨 폴더에서 재생성되는 Kaggle 업로드용 압축본
+src/v2_vision/my_data/labeled/*.bin
+src/v2_vision/my_data/labeled/*.zip

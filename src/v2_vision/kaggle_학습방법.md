@@ -7,12 +7,15 @@
 - ray_poster.bin: 실물크기 포스터 촬영 60장, 2026-07 추가 (POSTER_REPEAT로 독립 조절.
   실전 테스트 환경이 포스터라 기본 12로 강하게 시작)
 
-## 1. 로컬에서 레이 데이터 .bin 만들기
-새로 라벨링/재매핑 끝난 ray_all 폴더를 .bin으로:
-    cd ~/Desktop/휠체어프로젝트/my_data/labeled
-    cd ray_all && zip -r -q ../ray_all.zip . && cd ..
-    cp ray_all.zip ray_all.bin
-(공공 6종 bin은 이미 Kaggle에 있으면 재활용. 없으면 raw_datasets에서 다시 .bin 생성)
+## 1. 로컬에서 .bin 만들기 (라벨 폴더가 원본)
+새로 라벨링 끝난 폴더를 .bin으로 (ray_poster도 같은 방식):
+    cd src/v2_vision/my_data/labeled
+    cd ray_all && zip -r -q ../ray_all.bin . && cd ..
+공공 6종 bin은 kaggle_upload/에 로컬 백업 보관 (Kaggle에도 업로드돼 있음).
+둘 다 유실 시 raw_datasets/ zip을 SOURCES 파일명으로 개명하면 복원됨 (내용 동일, 2026-07-23 검증):
+ car-door-handle.v4i→handle.bin / Side Mirror.v2→mirror.bin /
+ license-plate-label.v5i→plate_old.bin / license plate.v1i→plate_new.bin /
+ KIA Logo.v2i→logo.bin / Fuel Cap.v15i→fuel_cap.bin
 
 ## 2. Kaggle 업로드
 - ray_all.bin (+ 새로 생겼으면 ray_poster.bin)을 데이터셋에 추가 (기존 데이터셋 있으면 거기에)

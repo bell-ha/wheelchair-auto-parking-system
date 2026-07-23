@@ -5,15 +5,19 @@
 ## 전역 클래스 표준 (자연어 언더바, nc=6)
 0:car_emblem  1:door_handle  2:fuel_cap  3:license_plate  4:side_mirror  5:tail_light
 
-## 폴더 구조
+## 폴더 구조 (2026-07-23 정리)
 - raw_datasets/ : 원본 Roboflow zip (건드리지 않음). 공공 6종 + ray_roboflow_v1.zip
 - models/ : best_v1_merged / best_v2_ft / best_v3_ray / best_v4_6cls(최신)
-- raw_videos/ : 레이 원본 영상 (1, 2, 3)
-- my_data/labeled/ray_all/ : 레이 라벨 데이터 (6종, 117장, 후미등 포함) ★현재 데이터
-- my_data/frames/ : 프레임 추출용 (현재 비어있음)
-- scripts/ : test_video.py, finetune_local.py, remap_ray.sh,
-             kaggle_finetune_v3.ipynb, kaggle_finetune_v4.ipynb
-- outputs/ : 결과 영상 (v3, v4 테스트)
+- raw_videos/ : 원본 영상 — 레이영상 1·2·3(실차) + 포스터레이.MOV(실물크기 포스터, 포스터 라벨의 원본)
+- my_data/labeled/ray_all/ : 실차 라벨 데이터 (6종, 121장) ★
+- my_data/labeled/ray_poster/ : 포스터 라벨 데이터 (6종, 60장, 2026-07 추가) ★
+- scripts/ : test_video.py, distance_video.py, live_camera.py, finetune_local.py,
+             kaggle_finetune_v3.ipynb, kaggle_finetune_v4.ipynb (remap_ray.sh는 5클래스 시절 유물 — 사용 금지)
+- outputs/ : 결과 영상 (v4 검출 3개 + distance HUD 3개만 보존. v3·tail 실험본은 삭제 — 스크립트로 재생성 가능)
+- seg_experiment/ : 세그멘테이션 실험 기록 (RESULTS.md + 스크립트만 보존, 대용량 삭제)
+- kaggle_upload/ : Kaggle 업로드용 공공 6종 .bin 로컬 백업 (캐글 데이터셋 유실 대비.
+  raw_datasets zip과 내용 동일, 이름만 노트북 SOURCES 기준)
+- my_data/labeled/ray_all.bin·ray_poster.bin : 라벨 폴더에서 재생성되는 업로드용 압축본 (git 미추적)
 
 ## 모델 버전 이력
 - v1_merged : 5종 개별→통합. 번호판 배경충돌로 억제됨

@@ -1,1 +1,3 @@
 *.pptx filter=lfs diff=lfs merge=lfs -text
+src/v2_vision/raw_videos/포스터레이.MOV filter=lfs diff=lfs merge=lfs -text
+src/v2_vision/outputs/poster_compare/포스터레이_v4_vs_v5.mp4 filter=lfs diff=lfs merge=lfs -text
