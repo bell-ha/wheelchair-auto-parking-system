@@ -136,7 +136,7 @@ h = int(cap.get(4))
 focal_px, _ = dv.load_focal_px(w)
 
 out_video = f"{V}/outputs/distance/포스터레이_pose_full.mp4"
-writer = cv2.VideoWriter(out_video, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+writer = cv2.VideoWriter(out_video, cv2.VideoWriter_fourcc(*"avc1"), fps, (w, h))
 
 pose = None          # [cx, cy, theta]
 last_track_t = None

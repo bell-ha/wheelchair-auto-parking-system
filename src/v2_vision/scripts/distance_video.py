@@ -413,7 +413,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     suffix = "_dist_tail.mp4" if args.tail else "_dist.mp4"
     out_path = str(out_dir / (Path(args.video).stem + suffix))
-    writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"avc1"), fps, (w, h))
 
     ema_dist = ema_yaw = ema_bearing = None
     dists, calib_heights, tail_frames = [], [], []
