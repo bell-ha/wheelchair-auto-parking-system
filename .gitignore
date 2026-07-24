@@ -24,3 +24,4 @@ src/v2_vision/kaggle_upload/plate_old.bin
 # 라벨 폴더에서 재생성되는 Kaggle 업로드용 압축본
 src/v2_vision/my_data/labeled/*.bin
 src/v2_vision/my_data/labeled/*.zip
+src/v2_vision/outputs/distance/포스터레이_dist.mp4
