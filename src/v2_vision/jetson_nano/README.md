@@ -28,11 +28,14 @@ jetson_nano/
 
 ```bash
 # 젯슨 터미널에서 — GitHub 폴더 안에 받는다
+# (clone --sparse 옵션은 구버전 git에서 버그가 있어 단계를 나눠 실행)
 cd ~/GitHub
-git clone --depth 1 --filter=blob:none --sparse \
+git clone --depth 1 --filter=blob:none --no-checkout \
     https://github.com/bell-ha/wheelchair-auto-parking-system.git
 cd wheelchair-auto-parking-system
+git sparse-checkout init --cone
 git sparse-checkout set src/v2_vision/jetson_nano
+git checkout main
 cd src/v2_vision/jetson_nano
 ```
 
