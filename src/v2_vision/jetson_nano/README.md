@@ -46,6 +46,32 @@ cd ~/GitHub/wheelchair-auto-parking-system
 git pull
 ```
 
+## 젯슨에서 수정 → push
+
+sparse checkout이어도 일반 git 저장소라 젯슨에서 테스트하며 고친 것도
+바로 commit·push 가능.
+
+처음 한 번만 설정:
+
+```bash
+git config --global user.name "LeeBellHa"
+git config --global user.email "studioseiha@gmail.com"
+git config --global credential.helper store   # 토큰 한 번 입력 후 저장
+```
+
+push할 때 비밀번호 자리에는 GitHub **Personal Access Token(PAT)** 입력
+(GitHub → Settings → Developer settings → Personal access tokens →
+Tokens (classic) → repo 권한 체크. 계정 비밀번호로는 push 안 됨).
+
+```bash
+git add -A
+git commit -m "젯슨: 테스트 중 수정"
+git push
+```
+
+**충돌 방지 규칙**: 맥이든 젯슨이든 작업 시작 전에 `git pull` 먼저,
+끝나면 바로 push. 양쪽에서 같은 파일을 동시에 고치면 충돌 남.
+
 **git 버전 주의**: 젯슨 나노(JetPack, Ubuntu 18.04)의 기본 git 2.17은
 `sparse-checkout` 명령이 없음(2.25+ 필요). 먼저 git을 업데이트할 것:
 
