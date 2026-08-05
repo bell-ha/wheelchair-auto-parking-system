@@ -5,6 +5,6 @@
 # GStreamer 지원 빌드를 사용할 것. (USB 웹캠만 쓰면 pip 빌드도 동작)
 ultralytics
 
-# hardware/ultrasound/keyboard.py (수동 조종 키보드 → MQTT)
-paho-mqtt
+# hardware/ultrasound/keyboard.py (수동 조종 키보드 → ESP32 USB 시리얼)
+pyserial
 pynput

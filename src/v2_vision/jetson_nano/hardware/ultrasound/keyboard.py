@@ -1,3 +1,4 @@
+import os
 from pynput import keyboard
 import serial
 
@@ -13,7 +14,11 @@ except serial.SerialException as e:
     raise SystemExit(1)
 
 def send_command(command):
-    ser.write(f"{command}\n".encode('utf-8'))
+    try:
+        ser.write(f"{command}\n".encode('utf-8'))
+    except serial.SerialException as e:
+        print(f"ESP32 시리얼 연결 끊김: {e}")
+        os._exit(1)  # 콜백 스레드 안이라 sys.exit로는 프로세스가 안 죽어서 강제 종료
 
 # 방향키에 따른 각도 매핑
 direction_map = {
