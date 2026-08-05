@@ -1,13 +1,22 @@
 import os
+import sys
+
 from pynput import keyboard
 import serial
+
+# hardware/ 공용 모듈(serial_link, joystick_controller) import를 위해
+# jetson_nano 루트를 sys.path에 넣음 (이 스크립트는 hardware/ultrasound/
+# 아래에서 직접 실행되므로 기본 sys.path엔 루트가 안 잡혀있음)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+from hardware.serial_link import SerialLink
+from hardware.joystick.joystick_controller import JoystickController
 
 # ESP32 USB 시리얼 설정
 SERIAL_PORT = '/dev/ttyUSB0'  # 환경에 따라 /dev/ttyACM0 등으로 다를 수 있음
 BAUD_RATE = 115200
 
 try:
-    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+    joystick = JoystickController(SerialLink(SERIAL_PORT, BAUD_RATE))
     print(f"ESP32 시리얼 연결 성공! ({SERIAL_PORT}, {BAUD_RATE}bps)")
 except serial.SerialException as e:
     print(f"ESP32 시리얼 연결 실패: {e}")
@@ -15,7 +24,7 @@ except serial.SerialException as e:
 
 def send_command(command):
     try:
-        ser.write(f"{command}\n".encode('utf-8'))
+        joystick.send_raw(str(command))
     except serial.SerialException as e:
         print(f"ESP32 시리얼 연결 끊김: {e}")
         os._exit(1)  # 콜백 스레드 안이라 sys.exit로는 프로세스가 안 죽어서 강제 종료
@@ -103,4 +112,4 @@ with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
     listener.join()
 
 # 시리얼 연결 종료
-ser.close()
+joystick.close()

@@ -141,7 +141,7 @@ void loop() {
 
   // 측정 실패 처리
   if (d1 < 0 || d2 < 0 || d3 < 0) {
-    Serial.println("Sensor read error");
+    Serial.println("US,ERR");
     delay(200);
     return;
   }
@@ -162,36 +162,25 @@ void loop() {
   );
 
   // =====================
-  // 결과 출력
+  // 결과 출력 (Jetson 파싱용 CSV)
   // =====================
+  // 형식: US,d1,d2,d3,angle_deg,center_distance_cm,perpendicular_distance_cm,distance_error_cm
+  // (hardware/ultrasound/ultrasound_reader.py 파서와 형식을 맞춰야 함)
 
-  Serial.print("D1: ");
+  Serial.print("US,");
   Serial.print(d1);
-  Serial.print(" cm, ");
-
-  Serial.print("D2: ");
+  Serial.print(",");
   Serial.print(d2);
-  Serial.print(" cm, ");
-
-  Serial.print("D3: ");
+  Serial.print(",");
   Serial.print(d3);
-  Serial.print(" cm | ");
-
-  Serial.print("Angle: ");
+  Serial.print(",");
   Serial.print(angle_deg);
-  Serial.print(" deg | ");
-
-  Serial.print("Center Distance: ");
+  Serial.print(",");
   Serial.print(center_distance_cm);
-  Serial.print(" cm | ");
-
-  Serial.print("Perpendicular Distance: ");
+  Serial.print(",");
   Serial.print(perpendicular_distance_cm);
-  Serial.print(" cm | ");
-
-  Serial.print("Distance Error: ");
-  Serial.print(distance_error_cm);
-  Serial.println(" cm");
+  Serial.print(",");
+  Serial.println(distance_error_cm);
 
   delay(100);
 }
