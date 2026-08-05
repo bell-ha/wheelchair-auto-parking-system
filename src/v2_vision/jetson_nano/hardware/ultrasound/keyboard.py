@@ -1,27 +1,19 @@
 from pynput import keyboard
-import paho.mqtt.client as mqtt
+import serial
 
-# MQTT 설정
-mqtt_broker = "broker.emqx.io"  # 브로커 IP 주소 입력
-mqtt_port = 1883
-mqtt_topic = "wheelchair/command"
-mqtt_username = "jiwookmqtt"
-mqtt_password = "public"
+# ESP32 USB 시리얼 설정
+SERIAL_PORT = '/dev/ttyUSB0'  # 환경에 따라 /dev/ttyACM0 등으로 다를 수 있음
+BAUD_RATE = 115200
 
-# MQTT 클라이언트 설정
-client = mqtt.Client()
+try:
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+    print(f"ESP32 시리얼 연결 성공! ({SERIAL_PORT}, {BAUD_RATE}bps)")
+except serial.SerialException as e:
+    print(f"ESP32 시리얼 연결 실패: {e}")
+    raise SystemExit(1)
 
-# MQTT 연결 콜백
-def on_connect(client, userdata, flags, rc):
-    if rc == 0:
-        print("MQTT 연결 성공!")
-    else:
-        print(f"MQTT 연결 실패! 코드: {rc}")
-
-# MQTT 설정 및 연결
-client.on_connect = on_connect
-client.connect(mqtt_broker, mqtt_port, 60)
-client.loop_start()  # MQTT 이벤트 루프 시작
+def send_command(command):
+    ser.write(f"{command}\n".encode('utf-8'))
 
 # 방향키에 따른 각도 매핑
 direction_map = {
@@ -53,15 +45,15 @@ def on_press(key):
             pressed_keys.discard('right')
             pressed_keys.discard('down')
             pressed_keys.discard('left')
-            client.publish(mqtt_topic, "stop")  # "stop" 명령 전송
+            send_command("stop")  # "stop" 명령 전송
             print("Stop 명령 전송! 방향키 초기화됨.")
 
         # 현재 눌린 키 조합에 따른 방향 계산
         direction = calculate_direction(pressed_keys)
         if direction is not None and direction != current_direction:
             current_direction = direction
-            # 현재 방향을 MQTT로 전송
-            client.publish(mqtt_topic, str(current_direction))
+            # 현재 방향을 ESP32로 전송
+            send_command(str(current_direction))
             print(f"Direction: {current_direction}°")
 
     except AttributeError:
@@ -82,7 +74,7 @@ def on_release(key):
         # 방향 업데이트
         direction = calculate_direction(pressed_keys)
         if direction is not None and direction != current_direction:
-            client.publish(mqtt_topic, str(direction))
+            send_command(str(direction))
             print(f"Direction: {direction}°")
 
     except AttributeError:
@@ -105,6 +97,5 @@ def calculate_direction(keys):
 with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
     listener.join()
 
-# MQTT 이벤트 루프 종료
-client.loop_stop()
-client.disconnect()
+# 시리얼 연결 종료
+ser.close()
