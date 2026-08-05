@@ -1,0 +1,10 @@
+# 젯슨 나노 배포용 파이썬 의존성
+#
+# 주의(젯슨): opencv는 pip로 설치하면 GStreamer 미지원 빌드가 깔려
+# CSI 카메라(--csi)가 안 열림. JetPack에 기본 포함된 OpenCV를 쓰거나
+# GStreamer 지원 빌드를 사용할 것. (USB 웹캠만 쓰면 pip 빌드도 동작)
+ultralytics
+
+# hardware/ultrasound/keyboard.py (수동 조종 키보드 → MQTT)
+paho-mqtt
+pynput
