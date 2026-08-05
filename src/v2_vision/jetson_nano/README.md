@@ -66,6 +66,12 @@ git push
 
 ```bash
 pip3 install -r requirements.txt
+
+# 주의: ultralytics가 opencv-python을 의존성으로 깔기 때문에 위 명령 직후
+# GStreamer 미지원 pip opencv가 다시 설치돼있음. 반드시 지워서 JetPack
+# 기본 OpenCV(dist-packages, GStreamer 지원)가 쓰이게 할 것 —
+# 안 지우면 USB 웹캠(C920)에서 카메라 열기가 무한 대기함.
+pip3 uninstall -y opencv-python
 ```
 
 `ultrasound.ino`는 아두이노 IDE로 아두이노 보드에 업로드 (젯슨 아님).
@@ -74,8 +80,13 @@ pip3 install -r requirements.txt
 
 ```bash
 cd ~/GitHub/wheelchair-auto-parking-system/src/v2_vision/jetson_nano
-python3 scripts/live_camera.py models/best_v5_poster.pt
+python3 scripts/live_camera.py models/best_v5_poster.pt --cam-width 640 --cam-height 480
 ```
+
+SSH/VSCode 원격 터미널로 실행해도 젯슨 본체 HDMI 모니터(:0)에 알아서 창이 뜸.
+시작하고 "모델 워밍업 중..."이 최대 1분 정도 뜨는 건 정상 (멈춘 게 아님).
+
+다른 옵션(콘솔 모드, CSI 카메라 등)은 `python3 scripts/live_camera.py --help`.
 
 부하 확인은 다른 터미널에서 `sudo tegrastats` 병행 권장 (GPU 사용률·온도·스로틀링 확인).
 자세한 결과는 [../jetson_부하테스트_보고서.md](../jetson_부하테스트_보고서.md) 참고.
