@@ -16,6 +16,22 @@ jetson_nano/
 └── requirements.txt
 ```
 
+## 젯슨 접속 (SSH)
+
+맥과 젯슨이 같은 네트워크(같은 공유기)에 있어야 함. 계정 `jetson`, 호스트명 `nano`.
+
+```bash
+# 맥에서 — 호스트명으로 접속 (mDNS)
+ssh jetson@nano.local
+
+# 안 되면 IP로
+ssh jetson@<JETSON_IP>
+```
+
+- IP 확인: 젯슨에서 `hostname -I`, 또는 공유기 관리 페이지 접속기기 목록.
+- IP가 자꾸 바뀌면 공유기에서 DHCP 고정(예약) 해두기.
+- 비밀번호 생략하려면 맥에서 한 번만: `ssh-copy-id jetson@nano.local`
+
 ## GitHub에서 받기
 
 리포 전체는 수 GB라 이 폴더만 sparse checkout으로 받는다.
