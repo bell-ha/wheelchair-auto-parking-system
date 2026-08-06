@@ -32,7 +32,7 @@ jetson_nano/
 # 맥에서 — 호스트명으로 접속 (mDNS)
 ssh jetson@nano.local
 
-# 안 되면 IP로
+# 안 되면 IP로 (192.168.0.254)
 ssh jetson@<JETSON_IP>
 ```
 
@@ -120,4 +120,11 @@ python3 hardware/ultrasound/keyboard.py
 
 ```bash
 python3 hardware/ultrasound/ultrasound_reader.py
+```
+
+
+
+## 젯슨나노 종료
+```bash
+sudo shutdown -h now
 ```
