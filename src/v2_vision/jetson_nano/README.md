@@ -6,15 +6,23 @@
 ```
 jetson_nano/
 ├── models/
-│   └── best_v5_poster.pt    # 최신 모델
+│   └── best_v5_poster.pt          # 최신 모델
 ├── scripts/
-│   └── live_camera.py       # 카메라 실시간 YOLO 추론 (USB 웹캠, C920)
+│   └── live_camera.py             # 카메라 실시간 YOLO 추론 (USB 웹캠, C920)
 ├── hardware/
+│   ├── serial_link.py             # 공용 시리얼 연결 헬퍼 (초음파/조이스틱 공용, 연결 하나 공유 가능)
+│   ├── joystick/
+│   │   └── joystick_controller.py # 방향 명령(각도/stop) 송신, keyboard.py가 사용
 │   └── ultrasound/
-│       ├── ultrasound.ino   # 아두이노: 초음파 3개로 벽 각도/거리 계산
-│       └── keyboard.py      # 방향키 → ESP32(USB 시리얼) 수동 조종
+│       ├── ultrasound.ino         # 아두이노/ESP32: 초음파 8개+IMU 골격 (WIP, 아직 더미값)
+│       ├── ultrasound_reader.py   # 시리얼 JSON 수신 확인용 스크립트 (WIP, 콘솔 출력만 함)
+│       └── keyboard.py            # 방향키 → JoystickController → ESP32 수동 조종
 └── requirements.txt
 ```
+
+카메라(비전) · 초음파+IMU · 조이스틱 송신은 각자 독립적으로 동작하는
+부품 상태이고, 셋을 엮어서 자동 주행 명령을 만드는 오케스트레이션
+코드(`main.py`)와 경로 계획 로직은 아직 없음 — 설계 방향 정해지는 대로 추가 예정.
 
 ## 젯슨 접속 (SSH)
 
@@ -74,7 +82,9 @@ pip3 install -r requirements.txt
 pip3 uninstall -y opencv-python
 ```
 
-`ultrasound.ino`는 아두이노 IDE로 아두이노 보드에 업로드 (젯슨 아님).
+`ultrasound.ino`는 아두이노 IDE로 아두이노/ESP32 보드에 업로드 (젯슨 아님).
+지금은 실제 센서/IMU 없이 더미값을 JSON으로 내보내는 골격만 있는 상태
+(하드웨어 도착하면 `readUltrasonicDummy`/`readYawDummy`를 실측 코드로 교체).
 
 ## 실행
 
@@ -99,4 +109,15 @@ Jetson과 ESP32는 USB 케이블로 직결, 포트는 `/dev/ttyUSB0`, 115200bps
 
 ```bash
 python3 hardware/ultrasound/keyboard.py
+```
+
+## 초음파 수신 확인 (ultrasound_reader.py)
+
+`ultrasound.ino`가 보내는 JSON 한 줄(`{"us":[...], "side_angle":.., "side_dist":.., "yaw":.., ...}`)을
+그대로 읽어서 콘솔에 찍어보는 연결 확인용 스크립트. 아직 값을 다른
+코드가 가져다 쓸 수 있는 형태는 아니고(백그라운드 스레드/조회 함수 없음),
+단독 실행만 됨. 포트는 파일 상단 `PORT`(`/dev/ttyUSB0`) 수정.
+
+```bash
+python3 hardware/ultrasound/ultrasound_reader.py
 ```

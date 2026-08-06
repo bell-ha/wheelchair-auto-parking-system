@@ -1,186 +1,78 @@
 #include <Arduino.h>
-#include <math.h>
 
-// =====================
-// 초음파 센서 핀 설정
-// =====================
+// 예시용 센서값
+float us[8];
 
-// D1: 앞쪽 센서
-const int TRIG_D1 = 6;
-const int ECHO_D1 = 7;
+float side_angle_deg = 0.0;
+float side_distance_cm = 0.0;
 
-// D2: 중앙 센서
-const int TRIG_D2 = 4;
-const int ECHO_D2 = 3;
+float imu_yaw = 0.0;
+float imu_pitch = 0.0;
+float imu_roll = 0.0;
 
-// D3: 뒤쪽 센서
-const int TRIG_D3 = 11;
-const int ECHO_D3 = 10;
-
-// =====================
-// 센서 배치 정보
-// =====================
-
-const float SENSOR_SPACING_CM = 5.25;   // D1-D2, D2-D3 간격
-const float X1 = -SENSOR_SPACING_CM;    // D1 위치
-const float X2 = 0.0;                   // D2 위치
-const float X3 = SENSOR_SPACING_CM;     // D3 위치
-
-// 목표 벽 거리
-const float TARGET_DISTANCE_CM = 30.0;  // 원하는 벽과의 거리, 필요하면 수정
-
-// 초음파 측정 범위
-const float MIN_VALID_CM = 2.0;
-const float MAX_VALID_CM = 200.0;
-
-// =====================
-// 초음파 거리 측정 함수
-// =====================
-
-float readUltrasonicCM(int trigPin, int echoPin) {
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-
-  // timeout: 25ms 정도면 약 4m까지 측정 가능
-  unsigned long duration = pulseIn(echoPin, HIGH, 25000UL);
-
-  if (duration == 0) {
-    return -1.0;  // 측정 실패
-  }
-
-  // 음속 기준 거리 계산
-  // 거리(cm) = 시간(us) * 0.0343 / 2
-  float distance = duration * 0.0343 / 2.0;
-
-  if (distance < MIN_VALID_CM || distance > MAX_VALID_CM) {
-    return -1.0;  // 비정상값 처리
-  }
-
-  return distance;
-}
-
-// =====================
-// 3개 센서값으로 벽 각도/거리 계산
-// =====================
-
-void calculateWallPose(
-  float d1,
-  float d2,
-  float d3,
-  float &angle_deg,
-  float &center_distance_cm,
-  float &perpendicular_distance_cm,
-  float &distance_error_cm
-) {
-  /*
-    좌표계:
-    x축: 휠체어 앞뒤 방향
-    y축: 센서가 바라보는 벽 방향
-
-    D1 = (x1, d1)
-    D2 = (x2, d2)
-    D3 = (x3, d3)
-
-    벽을 직선 y = m*x + b 로 근사
-  */
-
-  // 3개 점을 이용한 직선 기울기 m 계산
-  // x 좌표가 -a, 0, +a로 대칭이므로 단순화 가능
-  float m = (d3 - d1) / (2.0 * SENSOR_SPACING_CM);
-
-  // 절편 b 계산
-  // 세 점의 평균을 사용해서 중앙 거리 추정
-  float b = (d1 + d2 + d3) / 3.0;
-
-  // 벽과 휠체어의 상대 각도
-  float angle_rad = atan(m);
-  angle_deg = angle_rad * 180.0 / PI;
-
-  // 중앙 센서 위치에서 벽까지의 거리
-  center_distance_cm = b;
-
-  // 휠체어 중심점에서 벽까지의 최단거리
-  // 직선 y = mx + b 를 mx - y + b = 0 으로 보고 원점과의 거리 계산
-  perpendicular_distance_cm = b / sqrt(m * m + 1.0);
-
-  // 목표 거리와의 오차
-  // 양수: 벽에서 너무 멂
-  // 음수: 벽에 너무 가까움
-  distance_error_cm = center_distance_cm - TARGET_DISTANCE_CM;
-}
+const float SENSOR_SPACING_TOTAL_CM = 10.5;  // D1-D3 거리
+const float TARGET_DISTANCE_CM = 40.0;
 
 void setup() {
-  Serial.begin(9600);
-
-  pinMode(TRIG_D1, OUTPUT);
-  pinMode(ECHO_D1, INPUT);
-
-  pinMode(TRIG_D2, OUTPUT);
-  pinMode(ECHO_D2, INPUT);
-
-  pinMode(TRIG_D3, OUTPUT);
-  pinMode(ECHO_D3, INPUT);
-
-  Serial.println("3 Ultrasonic Wall Angle & Distance Test Start");
+  Serial.begin(115200);
 }
 
 void loop() {
-  // 초음파 센서는 동시에 쏘면 간섭이 생길 수 있으므로 순차 측정
-  float d1 = readUltrasonicCM(TRIG_D1, ECHO_D1);
-  delay(30);
-
-  float d2 = readUltrasonicCM(TRIG_D2, ECHO_D2);
-  delay(30);
-
-  float d3 = readUltrasonicCM(TRIG_D3, ECHO_D3);
-  delay(30);
-
-  // 측정 실패 처리
-  if (d1 < 0 || d2 < 0 || d3 < 0) {
-    Serial.println("US,ERR");
-    delay(200);
-    return;
+  // 1. 초음파센서 8개 읽기
+  // 실제로는 readUltrasonicCM() 같은 함수로 순차 측정
+  for (int i = 0; i < 8; i++) {
+    us[i] = readUltrasonicDummy(i);
   }
 
-  float angle_deg;
-  float center_distance_cm;
-  float perpendicular_distance_cm;
-  float distance_error_cm;
+  // 2. 예: 오른쪽 측면 센서 3개가 us[0], us[1], us[2]라고 가정
+  float d1 = us[0];  // 앞쪽
+  float d2 = us[1];  // 중앙
+  float d3 = us[2];  // 뒤쪽
 
-  calculateWallPose(
-    d1,
-    d2,
-    d3,
-    angle_deg,
-    center_distance_cm,
-    perpendicular_distance_cm,
-    distance_error_cm
-  );
+  side_angle_deg = atan((d3 - d1) / SENSOR_SPACING_TOTAL_CM) * 180.0 / PI;
+  side_distance_cm = d2;
 
-  // =====================
-  // 결과 출력 (Jetson 파싱용 CSV)
-  // =====================
-  // 형식: US,d1,d2,d3,angle_deg,center_distance_cm,perpendicular_distance_cm,distance_error_cm
-  // (hardware/ultrasound/ultrasound_reader.py 파서와 형식을 맞춰야 함)
+  // 3. IMU 값 읽기
+  // 실제로는 BNO086 라이브러리에서 yaw/pitch/roll 읽기
+  imu_yaw = readYawDummy();
+  imu_pitch = 0.0;
+  imu_roll = 0.0;
 
-  Serial.print("US,");
-  Serial.print(d1);
-  Serial.print(",");
-  Serial.print(d2);
-  Serial.print(",");
-  Serial.print(d3);
-  Serial.print(",");
-  Serial.print(angle_deg);
-  Serial.print(",");
-  Serial.print(center_distance_cm);
-  Serial.print(",");
-  Serial.print(perpendicular_distance_cm);
-  Serial.print(",");
-  Serial.println(distance_error_cm);
+  // 4. JSON 한 줄로 Jetson에 전송
+  Serial.print("{\"us\":[");
+  for (int i = 0; i < 8; i++) {
+    Serial.print(us[i], 2);
+    if (i < 7) Serial.print(",");
+  }
 
-  delay(100);
+  Serial.print("],\"side_angle\":");
+  Serial.print(side_angle_deg, 2);
+
+  Serial.print(",\"side_dist\":");
+  Serial.print(side_distance_cm, 2);
+
+  Serial.print(",\"yaw\":");
+  Serial.print(imu_yaw, 2);
+
+  Serial.print(",\"pitch\":");
+  Serial.print(imu_pitch, 2);
+
+  Serial.print(",\"roll\":");
+  Serial.print(imu_roll, 2);
+
+  Serial.print(",\"t\":");
+  Serial.print(millis());
+
+  Serial.println("}");
+
+  delay(50);  // 약 20Hz
+}
+
+// 테스트용 더미 함수
+float readUltrasonicDummy(int index) {
+  return 30.0 + index;
+}
+
+float readYawDummy() {
+  return millis() / 1000.0;
 }
