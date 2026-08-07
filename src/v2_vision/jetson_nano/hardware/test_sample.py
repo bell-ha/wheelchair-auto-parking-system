@@ -16,7 +16,7 @@ import serial
 SERIAL_PORT = "/dev/ttyUSB0"   # 필요하면 /dev/ttyACM0 로 변경
 SERIAL_BAUD = 115200
 
-SERVO_STEP_DEG = 0.1
+SERVO_STEP_DEG = 0.5  # 초당 회전속도를 기존 대비 5배로 (0.1 -> 0.5deg / COMMAND_INTERVAL)
 
 SERVO_MIN_DEG = 0.0
 SERVO_MAX_DEG = 180.0
@@ -52,6 +52,11 @@ class Telemetry:
     servo_x_deg: float = INITIAL_SERVO_X_DEG
     servo_y_deg: float = INITIAL_SERVO_Y_DEG
 
+    imu_ready: Optional[bool] = None
+    yaw_deg: Optional[float] = None
+    pitch_deg: Optional[float] = None
+    roll_deg: Optional[float] = None
+
     last_rx_time: float = 0.0
     last_raw: str = ""
 
@@ -71,7 +76,12 @@ def send_servo_command(ser: serial.Serial, servo_x_deg: float, servo_y_deg: floa
     ser.write(line.encode("utf-8"))
 
 
-def update_telemetry_from_json(data: dict, tel: Telemetry, raw: str) -> None:
+def update_telemetry_from_json(data, tel: Telemetry, raw: str) -> None:
+    # JSON 파싱은 됐지만 {"type":"telemetry", ...} 형태가 아닌 경우 방어
+    if not isinstance(data, dict):
+        tel.last_raw = f"ignored non-object JSON: {raw}"
+        return
+
     msg_type = data.get("type", "")
 
     if msg_type != "telemetry":
@@ -93,9 +103,13 @@ def update_telemetry_from_json(data: dict, tel: Telemetry, raw: str) -> None:
     tel.servo_x_deg = data.get("servo_x", tel.servo_x_deg)
     tel.servo_y_deg = data.get("servo_y", tel.servo_y_deg)
 
+    tel.imu_ready = data.get("imu_ready", tel.imu_ready)
+    tel.yaw_deg = data.get("yaw", tel.yaw_deg)
+    tel.pitch_deg = data.get("pitch", tel.pitch_deg)
+    tel.roll_deg = data.get("roll", tel.roll_deg)
+
     tel.last_rx_time = time.time()
     tel.last_raw = raw
-
 
 def read_serial_nonblocking(ser: serial.Serial, tel: Telemetry) -> None:
     while ser.in_waiting > 0:
@@ -111,9 +125,16 @@ def read_serial_nonblocking(ser: serial.Serial, tel: Telemetry) -> None:
 
         try:
             data = json.loads(raw)
-            update_telemetry_from_json(data, tel, raw)
         except json.JSONDecodeError:
             tel.last_raw = f"JSON parse error: {raw}"
+            continue
+
+        # dict가 아닌 JSON은 무시
+        if not isinstance(data, dict):
+            tel.last_raw = f"ignored non-object JSON: {raw}"
+            continue
+
+        update_telemetry_from_json(data, tel, raw)
 
 
 def fmt(value, unit="", width=8) -> str:
@@ -126,42 +147,55 @@ def fmt(value, unit="", width=8) -> str:
         return f"{'ERR':>{width}}{unit}"
 
 
+def safe_addstr(stdscr, y: int, x: int, text: str) -> None:
+    max_y, max_x = stdscr.getmaxyx()
+
+    if y < 0 or y >= max_y or x < 0 or x >= max_x:
+        return
+
+    try:
+        stdscr.addstr(y, x, text[: max_x - x])
+    except curses.error:
+        # 커서가 화면 맨 끝(우하단)에 닿으면 ncurses가 ERR을 반환하는 경우가 있어 무시
+        pass
+
+
 def draw_screen(stdscr, tel: Telemetry, target_x: float, target_y: float, port: str) -> None:
     stdscr.erase()
 
-    stdscr.addstr(0, 0, "Jetson Nano USB Serial Keyboard Servo Controller")
-    stdscr.addstr(1, 0, "Keys: A/D = Servo X, W/S = Servo Y, Q = quit")
-    stdscr.addstr(2, 0, f"Port: {port} | Baud: {SERIAL_BAUD} | Step: {SERVO_STEP_DEG:.1f} deg")
+    safe_addstr(stdscr, 0, 0, "Jetson Nano USB Serial Keyboard Servo Controller")
+    safe_addstr(stdscr, 1, 0, "Keys: A/D = Servo X, W/S = Servo Y, Q = quit")
+    safe_addstr(stdscr, 2, 0, f"Port: {port} | Baud: {SERIAL_BAUD} | Step: {SERVO_STEP_DEG:.1f} deg")
 
-    stdscr.addstr(4, 0, "< Command Target >")
-    stdscr.addstr(5, 0, f"Servo X target: {target_x:8.1f} deg")
-    stdscr.addstr(6, 0, f"Servo Y target: {target_y:8.1f} deg")
+    safe_addstr(stdscr, 4, 0, "< Command Target >")
+    safe_addstr(stdscr, 5, 0, f"Servo X target: {target_x:8.1f} deg")
+    safe_addstr(stdscr, 6, 0, f"Servo Y target: {target_y:8.1f} deg")
 
-    stdscr.addstr(8, 0, "< ESP32 Servo State >")
-    stdscr.addstr(9, 0, f"Servo X current: {tel.servo_x_deg:8.1f} deg")
-    stdscr.addstr(10, 0, f"Servo Y current: {tel.servo_y_deg:8.1f} deg")
+    safe_addstr(stdscr, 8, 0, "< ESP32 Servo State >")
+    safe_addstr(stdscr, 9, 0, f"Servo X current: {tel.servo_x_deg:8.1f} deg")
+    safe_addstr(stdscr, 10, 0, f"Servo Y current: {tel.servo_y_deg:8.1f} deg")
 
-    stdscr.addstr(12, 0, "< Ultrasonic >")
-    stdscr.addstr(13, 0, f"Front distance: {fmt(tel.front_cm, ' cm')}")
+    safe_addstr(stdscr, 12, 0, "< Ultrasonic >")
+    safe_addstr(stdscr, 13, 0, f"Front distance: {fmt(tel.front_cm, ' cm')}")
 
-    stdscr.addstr(15, 0, "< Left Side >")
-    stdscr.addstr(16, 0, f"L_FRONT: {fmt(tel.left_front_cm, ' cm')}")
-    stdscr.addstr(17, 0, f"L_REAR : {fmt(tel.left_rear_cm, ' cm')}")
-    stdscr.addstr(18, 0, f"L_DIST : {fmt(tel.left_dist_cm, ' cm')}")
-    stdscr.addstr(19, 0, f"L_ANGLE: {fmt(tel.left_angle_deg, ' deg')}")
+    safe_addstr(stdscr, 15, 0, "< Left Side >")
+    safe_addstr(stdscr, 16, 0, f"L_FRONT: {fmt(tel.left_front_cm, ' cm')}")
+    safe_addstr(stdscr, 17, 0, f"L_REAR : {fmt(tel.left_rear_cm, ' cm')}")
+    safe_addstr(stdscr, 18, 0, f"L_DIST : {fmt(tel.left_dist_cm, ' cm')}")
+    safe_addstr(stdscr, 19, 0, f"L_ANGLE: {fmt(tel.left_angle_deg, ' deg')}")
 
-    stdscr.addstr(21, 0, "< Right Side >")
-    stdscr.addstr(22, 0, f"R_FRONT: {fmt(tel.right_front_cm, ' cm')}")
-    stdscr.addstr(23, 0, f"R_REAR : {fmt(tel.right_rear_cm, ' cm')}")
-    stdscr.addstr(24, 0, f"R_DIST : {fmt(tel.right_dist_cm, ' cm')}")
-    stdscr.addstr(25, 0, f"R_ANGLE: {fmt(tel.right_angle_deg, ' deg')}")
+    safe_addstr(stdscr, 21, 0, "< Right Side >")
+    safe_addstr(stdscr, 22, 0, f"R_FRONT: {fmt(tel.right_front_cm, ' cm')}")
+    safe_addstr(stdscr, 23, 0, f"R_REAR : {fmt(tel.right_rear_cm, ' cm')}")
+    safe_addstr(stdscr, 24, 0, f"R_DIST : {fmt(tel.right_dist_cm, ' cm')}")
+    safe_addstr(stdscr, 25, 0, f"R_ANGLE: {fmt(tel.right_angle_deg, ' deg')}")
 
     age = time.time() - tel.last_rx_time if tel.last_rx_time > 0 else None
-    stdscr.addstr(27, 0, f"Last ESP32 RX: {fmt(age, ' s')} ago")
+    safe_addstr(stdscr, 27, 0, f"Last ESP32 RX: {fmt(age, ' s')} ago")
 
-    stdscr.addstr(29, 0, "< Last raw line >")
+    safe_addstr(stdscr, 29, 0, "< Last raw line >")
     raw_line = tel.last_raw[:110] if tel.last_raw else ""
-    stdscr.addstr(30, 0, raw_line)
+    safe_addstr(stdscr, 30, 0, raw_line)
 
     stdscr.refresh()
 
