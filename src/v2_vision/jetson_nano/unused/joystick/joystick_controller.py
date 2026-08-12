@@ -4,7 +4,7 @@ keyboard.py(수동 조종)와 main.py(자동 주행) 양쪽에서 공용으로 �
 프로토콜: 각도(0/90/180/270) 문자열 또는 "stop" — 기존 keyboard.py가
 쓰던 것과 동일.
 """
-from hardware.serial_link import SerialLink
+from serial_link import SerialLink
 
 
 class JoystickController:

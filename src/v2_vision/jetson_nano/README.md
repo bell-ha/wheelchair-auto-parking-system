@@ -1,28 +1,28 @@
 # jetson_nano — 젯슨 나노 배포용 폴더
 
-카메라 실시간 추론 + 하드웨어(초음파/수동조종) 코드 모음.
+카메라 실시간 추론 + 하드웨어(초음파/서보) 통합 코드 모음.
 학습 코드·데이터셋은 없음 (추론 전용).
 
 ```
 jetson_nano/
-├── models/
+├── main.py                        # 통합 실행: 카메라(YOLO) + 초음파/서보(ESP32) 한 프로세스
+├── camera/
+│   ├── live_camera.py             # 카메라 단독 실행/부하테스트용 (USB 웹캠, C920)
 │   └── best_v5_poster.pt          # 최신 모델
-├── scripts/
-│   └── live_camera.py             # 카메라 실시간 YOLO 추론 (USB 웹캠, C920)
-├── hardware/
-│   ├── serial_link.py             # 공용 시리얼 연결 헬퍼 (초음파/조이스틱 공용, 연결 하나 공유 가능)
-│   ├── joystick/
-│   │   └── joystick_controller.py # 방향 명령(각도/stop) 송신, keyboard.py가 사용
-│   └── ultrasound/
-│       ├── ultrasound.ino         # 아두이노/ESP32: 초음파 8개+IMU 골격 (WIP, 아직 더미값)
-│       ├── ultrasound_reader.py   # 시리얼 JSON 수신 확인용 스크립트 (WIP, 콘솔 출력만 함)
-│       └── keyboard.py            # 방향키 → JoystickController → ESP32 수동 조종
-└── requirements.txt
+├── ultrasound/
+│   ├── sample.ino                 # ESP32 펌웨어: 초음파 5개 + 서보 2축(팬/틸트), JSON 프로토콜
+│   └── test_sample.py             # 수동 조작용 curses 툴 (A/D/W/S로 서보, 텔레메트리 화면표시)
+├── unused/                        # 지금 안 쓰는 코드 (이유는 unused/README.md 참고)
+│   └── joystick/                  # 휠체어 주행 방향 제어 — 받아줄 펌웨어가 아직 없음
+├── requirements.txt
+└── README.md
 ```
 
-카메라(비전) · 초음파+IMU · 조이스틱 송신은 각자 독립적으로 동작하는
-부품 상태이고, 셋을 엮어서 자동 주행 명령을 만드는 오케스트레이션
-코드(`main.py`)와 경로 계획 로직은 아직 없음 — 설계 방향 정해지는 대로 추가 예정.
+`main.py`가 카메라(비전)와 초음파/서보(ESP32)를 한 프로세스에서 같이 돌리는
+통합 실행 파일 — 검출 결과와 초음파 텔레메트리를 매 프레임 터미널에 같이 출력함.
+`camera/live_camera.py`와 `ultrasound/test_sample.py`는 각 부품을 단독으로 빠르게
+점검하고 싶을 때 쓰는 개별 진입점으로 계속 남겨둠. 카메라/초음파 값을 엮어서 서보를
+자동으로 움직이는 판단 로직은 아직 없음 (지금은 순수 통합만).
 
 ## 젯슨 접속 (SSH)
 
@@ -82,45 +82,56 @@ pip3 install -r requirements.txt
 pip3 uninstall -y opencv-python
 ```
 
-`ultrasound.ino`는 아두이노 IDE로 아두이노/ESP32 보드에 업로드 (젯슨 아님).
-지금은 실제 센서/IMU 없이 더미값을 JSON으로 내보내는 골격만 있는 상태
-(하드웨어 도착하면 `readUltrasonicDummy`/`readYawDummy`를 실측 코드로 교체).
+`ultrasound/sample.ino`는 아두이노 IDE로 ESP32 보드에 업로드 (젯슨 아님).
+Jetson과 ESP32는 USB 케이블로 직결, 포트는 `/dev/ttyUSB0`, 115200bps.
 
-## 실행
+## 실행 (통합 — main.py)
 
 ```bash
 cd ~/GitHub/wheelchair-auto-parking-system/src/v2_vision/jetson_nano
-python3 scripts/live_camera.py models/best_v5_poster.pt --cam-width 640 --cam-height 480
+python3 main.py camera/best_v5_poster.pt --cam-width 1280 --cam-height 720
+```
+
+카메라(YOLO 검출)와 ESP32(초음파 텔레메트리 수신)를 한 프로세스에서 같이 돌림.
+터미널에 `test_sample.py`와 같은 스타일의 고정 화면(curses)이 뜨고, 검출 개수·FPS·
+초음파 5개 값·서보 현재각이 실시간으로 갱신됨. `q`로 종료.
+
+- HDMI 모니터에는 검출 박스가 그려진 카메라 창이 같이 뜸 (`--no-show`로 끄면 터미널 화면만)
+- ESP32가 안 붙어있으면 `--no-servo`로 카메라만 테스트 가능
+- 그 외 옵션은 `python3 main.py --help`
+
+시작 직후 "모델 워밍업 중..."이 30초~1분 정도 뜨는 건 정상 (젯슨 첫 추론 특성).
+워밍업이 끝나야 터미널 화면으로 전환됨.
+
+`--cam-width`/`--cam-height`는 16:9 조합(1280x720, 1920x1080 등)으로 맞출 것 — C920은
+4:3 해상도(640x480, 800x600, 1280x960)를 요청하면 카메라 자체가 좌우를 크롭해서
+화각이 좁아짐. 1920x1080은 화면은 더 선명하지만 이 보드(RAM 4GB) 기준 메모리 여유가
+빠듯해서(스왑 발생 확인됨) 1280x720 권장.
+
+## 카메라만 단독 실행 (live_camera.py)
+
+부하 테스트나 카메라 단독 점검용. `main.py`와 옵션 동일.
+
+```bash
+python3 camera/live_camera.py camera/best_v5_poster.pt --cam-width 1280 --cam-height 720
 ```
 
 SSH/VSCode 원격 터미널로 실행해도 젯슨 본체 HDMI 모니터(:0)에 알아서 창이 뜸.
 시작하고 "모델 워밍업 중..."이 최대 1분 정도 뜨는 건 정상 (멈춘 게 아님).
 
-다른 옵션(콘솔 모드, CSI 카메라 등)은 `python3 scripts/live_camera.py --help`.
-
 부하 확인은 다른 터미널에서 `sudo tegrastats` 병행 권장 (GPU 사용률·온도·스로틀링 확인).
 자세한 결과는 [../jetson_부하테스트_보고서.md](../jetson_부하테스트_보고서.md) 참고.
 
-## 수동 조종 (keyboard.py)
+## 초음파+서보 수동 조작/점검 (test_sample.py)
 
-방향키 → ESP32에 USB 시리얼로 각도(0/90/180/270) 전송, `s`로 정지.
-Jetson과 ESP32는 USB 케이블로 직결, 포트는 `/dev/ttyUSB0`, 115200bps
-(필요 시 파일 상단 `SERIAL_PORT`/`BAUD_RATE` 수정).
-
-```bash
-python3 hardware/ultrasound/keyboard.py
-```
-
-## 초음파 수신 확인 (ultrasound_reader.py)
-
-`ultrasound.ino`가 보내는 JSON 한 줄(`{"us":[...], "side_angle":.., "side_dist":.., "yaw":.., ...}`)을
-그대로 읽어서 콘솔에 찍어보는 연결 확인용 스크립트. 아직 값을 다른
-코드가 가져다 쓸 수 있는 형태는 아니고(백그라운드 스레드/조회 함수 없음),
-단독 실행만 됨. 포트는 파일 상단 `PORT`(`/dev/ttyUSB0`) 수정.
+A/D = 서보 X, W/S = 서보 Y, Q = 종료. 초음파 5개(정면/좌전/좌후/우전/우후) 텔레메트리도
+화면에 같이 표시됨. ESP32 연결 상태를 빠르게 점검하고 싶을 때 이걸로.
 
 ```bash
-python3 hardware/ultrasound/ultrasound_reader.py
+python3 ultrasound/test_sample.py
 ```
+
+포트는 파일 상단 `SERIAL_PORT`(`/dev/ttyUSB0`) 수정.
 
 
 

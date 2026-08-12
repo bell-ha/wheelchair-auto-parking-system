@@ -1,15 +1,10 @@
 import os
-import sys
 
 from pynput import keyboard
 import serial
 
-# hardware/ 공용 모듈(serial_link, joystick_controller) import를 위해
-# jetson_nano 루트를 sys.path에 넣음 (이 스크립트는 hardware/ultrasound/
-# 아래에서 직접 실행되므로 기본 sys.path엔 루트가 안 잡혀있음)
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-from hardware.serial_link import SerialLink
-from hardware.joystick.joystick_controller import JoystickController
+from serial_link import SerialLink
+from joystick_controller import JoystickController
 
 # ESP32 USB 시리얼 설정
 SERIAL_PORT = '/dev/ttyUSB0'  # 환경에 따라 /dev/ttyACM0 등으로 다를 수 있음
