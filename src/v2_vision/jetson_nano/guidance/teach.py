@@ -135,7 +135,7 @@ def parse_args():
     parser.add_argument('--imgsz', type=int, default=640)
     parser.add_argument('--model', default=str(DEFAULT_MODEL))
     parser.add_argument('--goal', default=str(DEFAULT_GOAL))
-    parser.add_argument('--display-scale', type=float, default=1.0,
+    parser.add_argument('--display-scale', type=float, default=0.5,
                         help='표시 창 배율 (작은 모니터면 0.5 등, 추론엔 영향 없음)')
     return parser.parse_args()
 

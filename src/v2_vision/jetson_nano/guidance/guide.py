@@ -186,7 +186,7 @@ def parse_args():
                         help='좌/우 방향이 반대로 움직이면 지정')
     parser.add_argument('--invert-y', action='store_true',
                         help='전/후 방향이 반대로 움직이면 지정')
-    parser.add_argument('--display-scale', type=float, default=1.0,
+    parser.add_argument('--display-scale', type=float, default=0.5,
                         help='표시 창 배율 (작은 모니터면 0.5 등, 추론엔 영향 없음)')
     return parser.parse_args()
 

@@ -425,7 +425,7 @@ def main():
                     help="자동모드 전/후가 반대로 움직이면 지정")
     # C920 수평 화각: 16:9에서 약 70.4도(=1.229rad) — 지도 위치 추정에 사용
     ap.add_argument("--hfov", type=float, default=1.229)
-    ap.add_argument("--display-scale", type=float, default=1.0,
+    ap.add_argument("--display-scale", type=float, default=0.5,
                     help="카메라+지도 창 배율 (작은 모니터면 0.5 등, 추론엔 영향 없음)")
     args = ap.parse_args()
 
