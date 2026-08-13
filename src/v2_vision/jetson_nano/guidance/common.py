@@ -59,8 +59,52 @@ class SerialSonar:
         """서보(조이스틱 액추에이터) 명령 송신 — 같은 ESP32 연결 재사용."""
         self.link.send_servo(x_deg, y_deg)
 
+    @property
+    def telemetry(self):
+        """최신 원시 텔레메트리 dict (cm 단위 그대로) — 화면 표시용."""
+        return self.link.telemetry
+
+    def rx_age(self):
+        return self.link.rx_age()
+
     def close(self):
         self.link.close()
+
+
+def draw_telemetry_overlay(image, sonar):
+    """카메라 프레임 좌하단에 ESP32 원시 텔레메트리를 표시 (main.py 화면의 축약판).
+
+    'sonar INVALID'만 보고 원인을 알 수 없는 문제 해결용 — 실제로 어떤 값이
+    오는지(-1인지, 수신이 끊겼는지, 범위 밖인지)를 눈으로 확인할 수 있게 함.
+    거리 단위는 펌웨어 원본 그대로 cm.
+    """
+    tel = sonar.telemetry
+    age = sonar.rx_age()
+
+    def f(key):
+        value = tel.get(key)
+        try:
+            return f'{float(value):.0f}'
+        except (TypeError, ValueError):
+            return '--'
+
+    rx = 'RX ---' if age is None else f'RX {age:.1f}s'
+    lines = [
+        f'{rx} | front {f("front")}cm',
+        f'L f{f("left_front")} r{f("left_rear")} d{f("left_dist")} a{f("left_angle")}',
+        f'R f{f("right_front")} r{f("right_rear")} d{f("right_dist")} a{f("right_angle")}',
+        f'servo echo {f("servo_x")}/{f("servo_y")}',
+    ]
+
+    height = image.shape[0]
+    y0 = height - 8 - 18 * (len(lines) - 1)
+    cv2.rectangle(image, (0, y0 - 16), (255, height), (20, 20, 20), -1)
+    # 수신이 끊겼거나 1초 이상 오래되면 첫 줄을 빨간색으로
+    head_color = (0, 0, 255) if (age is None or age > 1.0) else (180, 255, 180)
+    for i, line in enumerate(lines):
+        color = head_color if i == 0 else (200, 200, 200)
+        cv2.putText(image, line, (6, y0 + 18 * i),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, color, 1)
 
 
 def load_model(path=DEFAULT_MODEL):

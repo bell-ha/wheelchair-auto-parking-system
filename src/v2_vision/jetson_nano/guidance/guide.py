@@ -14,8 +14,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from common import (DEFAULT_GOAL, DEFAULT_MODEL, MAP_WIDTH, FeatureSmoother,
-                    SerialSonar, Webcam, draw_top_view, extract_anchor,
-                    load_goal, load_model, relative_estimate,
+                    SerialSonar, Webcam, draw_telemetry_overlay, draw_top_view,
+                    extract_anchor, load_goal, load_model, relative_estimate,
                     scaled_goal_feature)
 
 
@@ -193,6 +193,7 @@ class GuideApp:
                     detail += " | display only"
                 cv2.putText(out, detail, (12, 66), cv2.FONT_HERSHEY_SIMPLEX,
                             0.46, (220, 220, 220), 1)
+                draw_telemetry_overlay(out, self.sonar)
                 shown = np.hstack((out, self._map(estimate, out.shape[0])))
                 if self.args.display_scale != 1.0:
                     # 작은 모니터용: 표시만 축소 (캡처/추론 해상도는 그대로)

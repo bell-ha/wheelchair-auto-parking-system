@@ -13,8 +13,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from common import (DEFAULT_GOAL, DEFAULT_MODEL, MAP_WIDTH, SerialSonar,
-                    Webcam, draw_top_view, extract_anchor, load_model,
-                    map_to_pose, save_goal)
+                    Webcam, draw_telemetry_overlay, draw_top_view,
+                    extract_anchor, load_model, map_to_pose, save_goal)
 
 
 CAMERA_FAIL_SECONDS = 5.0
@@ -88,6 +88,7 @@ class TeachApp:
                 cv2.putText(out, '[s] SAVE  [q] QUIT', (8, 74),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.52,
                             (255, 255, 255), 2)
+                draw_telemetry_overlay(out, self.sonar)
                 panel = draw_top_view(
                     self.frame.shape[0], target=self.target, width=MAP_WIDTH)
                 cv2.putText(panel, 'CLICK GT TARGET POSITION', (12, 24),
