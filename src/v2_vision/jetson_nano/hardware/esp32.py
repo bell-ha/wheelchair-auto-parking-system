@@ -35,6 +35,7 @@ class ESP32Link:
         self.stale_seconds = stale_seconds
         self.telemetry = {}         # 최신 텔레메트리 (원본 cm 단위 그대로)
         self._buffer = bytearray()
+        self._last_valid_pair = {}  # side별 마지막 유효 측면 쌍 캐시 (깜빡임 완화)
 
     # ---------------- 수신 ----------------
 
@@ -73,21 +74,32 @@ class ESP32Link:
     def side_pair_m(self, side="right"):
         """측면 앞/뒤 초음파 쌍을 m 단위로 반환. 무효면 None. (guidance 정렬용)
 
-        무효 조건: 수신이 오래됨(stale_seconds 초과) / 측정 실패(-1) /
-        유효범위(0~3m) 밖.
+        초음파는 표면 각도/재질에 따라 개별 측정이 간헐적으로 실패(-1)하는 게
+        정상이라, 이번 측정이 무효여도 stale_seconds 안의 마지막 유효 쌍을
+        대신 반환한다 (깜빡임 한두 번에 판단이 INVALID로 튀지 않게).
+        진짜로 stale_seconds 이상 유효값이 없을 때만 None.
         """
+        now = time.monotonic()
         age = self.rx_age()
-        if age is None or age > self.stale_seconds:
-            return None
-        try:
-            front = float(self.telemetry[f"{side}_front"]) / 100.0
-            rear = float(self.telemetry[f"{side}_rear"]) / 100.0
-        except (KeyError, TypeError, ValueError):
-            return None
-        if not all(math.isfinite(v) and 0.0 < v < SONAR_MAX_M
-                   for v in (front, rear)):
-            return None
-        return {"front": front, "rear": rear}
+        pair = None
+        if age is not None and age <= self.stale_seconds:
+            try:
+                front = float(self.telemetry[f"{side}_front"]) / 100.0
+                rear = float(self.telemetry[f"{side}_rear"]) / 100.0
+                if all(math.isfinite(v) and 0.0 < v < SONAR_MAX_M
+                       for v in (front, rear)):
+                    pair = {"front": front, "rear": rear}
+            except (KeyError, TypeError, ValueError):
+                pass
+
+        if pair is not None:
+            self._last_valid_pair[side] = (pair, now)
+            return dict(pair)
+
+        cached = self._last_valid_pair.get(side)
+        if cached is not None and now - cached[1] <= self.stale_seconds:
+            return dict(cached[0])
+        return None
 
     # ---------------- 송신 ----------------
 
