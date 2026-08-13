@@ -40,6 +40,10 @@ class TeachApp:
     def _mouse(self, event, x, y, _flags, _param):
         if event != cv2.EVENT_LBUTTONDOWN or self.frame is None:
             return
+        # 표시 배율 적용 중이면 클릭 좌표를 원본 좌표계로 환산
+        scale = self.args.display_scale
+        x = int(x / scale)
+        y = int(y / scale)
         camera_width = self.frame.shape[1]
         if camera_width <= x < camera_width + MAP_WIDTH:
             px, py = map_to_pose(
@@ -89,7 +93,12 @@ class TeachApp:
                 cv2.putText(panel, 'CLICK GT TARGET POSITION', (12, 24),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.48,
                             (0, 255, 255), 1)
-                cv2.imshow(self.WINDOW, np.hstack((out, panel)))
+                shown = np.hstack((out, panel))
+                if self.args.display_scale != 1.0:
+                    # 작은 모니터용: 표시만 축소 (클릭 좌표는 _mouse에서 역환산)
+                    shown = cv2.resize(shown, None, fx=self.args.display_scale,
+                                       fy=self.args.display_scale)
+                cv2.imshow(self.WINDOW, shown)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('s'):
                     if feature is None or sonar is None or self.target is None:
@@ -125,6 +134,8 @@ def parse_args():
     parser.add_argument('--imgsz', type=int, default=640)
     parser.add_argument('--model', default=str(DEFAULT_MODEL))
     parser.add_argument('--goal', default=str(DEFAULT_GOAL))
+    parser.add_argument('--display-scale', type=float, default=1.0,
+                        help='표시 창 배율 (작은 모니터면 0.5 등, 추론엔 영향 없음)')
     return parser.parse_args()
 
 
