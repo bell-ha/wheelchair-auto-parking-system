@@ -25,6 +25,10 @@ EPS_SONAR_DIFF = 0.035
 STABLE_FRAMES = 8
 CAMERA_FAIL_SECONDS = 5.0
 
+# --drive 모드: 지시를 서보(조이스틱 액추에이터)로 실제 전송할 때의 값들
+SERVO_CENTER = 90.0        # 중앙 = 조이스틱 중립 = 정지
+SERVO_KEEPALIVE = 0.5      # 같은 목표각이라도 이 주기(초)마다 재전송
+
 
 class GuideApp:
 
@@ -44,10 +48,44 @@ class GuideApp:
         self.smoother = FeatureSmoother(alpha=0.35)
         self.phase = 'VISION'
         self.stable = 0
+        self.last_sent = None
+        self.last_sent_time = 0.0
+        if args.drive:
+            print('*** DRIVE MODE: 지시가 서보(조이스틱)로 실제 전송됩니다 ***')
+            print('*** 첫 테스트는 반드시 휠체어 전원을 끄거나 바퀴를 띄운 상태로! ***')
 
     @staticmethod
     def _direction(value, positive, negative):
         return positive if value > 0.0 else negative
+
+    def _servo_targets(self, text):
+        """지시 문구 → 서보 목표각. 이동 지시 4개만 편향, 나머지(STOP류/미지)는 중앙=정지.
+
+        어느 방향이 물리적으로 좌/전진인지는 서보-조이스틱 장착 방향에 달렸으므로
+        --invert-x/--invert-y로 현장에서 맞출 것.
+        """
+        x = y = SERVO_CENTER
+        sx = -1.0 if self.args.invert_x else 1.0
+        sy = -1.0 if self.args.invert_y else 1.0
+        if text == 'TURN LEFT':
+            x = SERVO_CENTER - sx * self.args.turn_deg
+        elif text == 'TURN RIGHT':
+            x = SERVO_CENTER + sx * self.args.turn_deg
+        elif text == 'MOVE FORWARD':
+            y = SERVO_CENTER + sy * self.args.drive_deg
+        elif text == 'MOVE BACKWARD':
+            y = SERVO_CENTER - sy * self.args.drive_deg
+        return x, y
+
+    def _drive(self, text):
+        """--drive일 때만 호출. 목표각이 바뀌었거나 keepalive 주기가 지나면 전송."""
+        x, y = self._servo_targets(text)
+        now = time.monotonic()
+        if (x, y) != self.last_sent or now - self.last_sent_time > SERVO_KEEPALIVE:
+            self.sonar.send_servo(x, y)
+            self.last_sent = (x, y)
+            self.last_sent_time = now
+        return x, y
 
     def _instruction(self, feature, sonar, image_shape):
         if feature is None:
@@ -128,6 +166,7 @@ class GuideApp:
                 feature = self.smoother.update(raw)
                 text, color, errors = self._instruction(
                     feature, sonar, frame.shape)
+                servo_xy = self._drive(text) if self.args.drive else None
                 estimate = (relative_estimate(
                     self.goal, feature, sonar, frame.shape[1], self.args.hfov)
                     if feature is not None and sonar is not None else None)
@@ -148,6 +187,10 @@ class GuideApp:
                     detail += f" du={errors[0]:+.3f} scale={errors[1]:+.3f}"
                     if errors[2] is not None:
                         detail += f" sonarYaw={errors[2]:+.3f}m"
+                if servo_xy is not None:
+                    detail += f" | DRIVE x={servo_xy[0]:.0f} y={servo_xy[1]:.0f}"
+                else:
+                    detail += " | display only"
                 cv2.putText(out, detail, (12, 66), cv2.FONT_HERSHEY_SIMPLEX,
                             0.46, (220, 220, 220), 1)
                 cv2.imshow(self.WINDOW,
@@ -158,6 +201,14 @@ class GuideApp:
                 elif key == ord('q'):
                     break
         finally:
+            # 어떤 경로로 끝나든(q, 예외, 카메라 사망) 조이스틱은 반드시 중립으로
+            if self.args.drive:
+                try:
+                    for _ in range(3):
+                        self.sonar.send_servo(SERVO_CENTER, SERVO_CENTER)
+                        time.sleep(0.05)
+                except Exception:
+                    pass
             self.webcam.release()
             self.sonar.close()
             cv2.destroyAllWindows()
@@ -181,6 +232,17 @@ def parse_args():
     parser.add_argument('--hfov', type=float, default=1.229)
     parser.add_argument('--model', default=str(DEFAULT_MODEL))
     parser.add_argument('--goal', default=str(DEFAULT_GOAL))
+    # 서보(조이스틱 액추에이터) 실구동 — 기본은 화면 표시만
+    parser.add_argument('--drive', action='store_true',
+                        help='지시를 서보로 실제 전송 (첫 테스트는 휠체어 전원 OFF로!)')
+    parser.add_argument('--turn-deg', type=float, default=10.0,
+                        help='좌/우회전 시 서보 X 편향각 (중앙 90 기준, 기본 10)')
+    parser.add_argument('--drive-deg', type=float, default=10.0,
+                        help='전/후진 시 서보 Y 편향각 (중앙 90 기준, 기본 10)')
+    parser.add_argument('--invert-x', action='store_true',
+                        help='좌/우 방향이 반대로 움직이면 지정')
+    parser.add_argument('--invert-y', action='store_true',
+                        help='전/후 방향이 반대로 움직이면 지정')
     return parser.parse_args()
 
 

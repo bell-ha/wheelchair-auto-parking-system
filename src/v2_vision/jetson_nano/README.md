@@ -145,9 +145,15 @@ teach & repeat 방식: `teach.py`로 목표 상태(사이드미러 위치·크�
 ①VISION 단계(사이드미러 정렬) → ②SONAR 단계(측면 초음파 앞/뒤 차이로 평행 정렬) 순서.
 
 ```bash
-python3 guidance/teach.py    # 지도 패널 클릭으로 목표 지정, s 저장, q 종료
-python3 guidance/guide.py    # r로 VISION 단계 재시작, q 종료
+python3 guidance/teach.py            # 지도 패널 클릭으로 목표 지정, s 저장, q 종료
+python3 guidance/guide.py            # 지시 화면 표시만 (기본, 안전)
+python3 guidance/guide.py --drive    # 지시를 서보(조이스틱)로 실제 전송 — 자동 구동
 ```
+
+`--drive` 모드: TURN/MOVE 지시가 서보 X/Y 편향(기본 ±10°, `--turn-deg`/`--drive-deg`)으로
+전송되고, STOP류 지시·타겟 상실·종료 시엔 무조건 중앙(90/90=정지)으로 복귀함.
+**첫 구동 테스트는 반드시 휠체어 전원을 끄거나 바퀴를 띄운 상태에서** 서보가
+의도한 방향으로 움직이는지 확인하고, 반대로 움직이면 `--invert-x`/`--invert-y`로 보정.
 
 - 카메라·시리얼을 main.py/test_sample.py와 공유하므로 **동시 실행 불가**
 - 초음파 기준 거리(SONAR_BASELINE=0.315m)는 `sample.ino`의 `SIDE_SENSOR_SPACING_CM=31.5`와

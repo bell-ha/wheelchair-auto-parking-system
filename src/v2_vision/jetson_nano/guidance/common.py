@@ -140,6 +140,19 @@ class SerialSonar:
             return None
         return dict(self.values)
 
+    def send_servo(self, x_deg, y_deg):
+        """서보(조이스틱 액추에이터) 명령 송신.
+
+        초음파를 보내는 ESP32(ultrasound/sample.ino)가 서보 2축도 같이 받으므로
+        이 시리얼 연결을 그대로 재사용한다. 프로토콜은 main.py/test_sample.py와 동일:
+        {"cmd":"servo","x":0~180,"y":0~180} 한 줄.
+        """
+        msg = json.dumps(
+            {'cmd': 'servo', 'x': round(float(x_deg), 1),
+             'y': round(float(y_deg), 1)},
+            separators=(',', ':')) + '\n'
+        self.serial.write(msg.encode('utf-8'))
+
     def close(self):
         self.serial.close()
 
