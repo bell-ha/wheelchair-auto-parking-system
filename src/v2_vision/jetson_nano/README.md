@@ -87,20 +87,27 @@ pip3 uninstall -y opencv-python
 `ultrasound/sample.ino`는 아두이노 IDE로 ESP32 보드에 업로드 (젯슨 아님).
 Jetson과 ESP32는 USB 케이블로 직결, 포트는 `/dev/ttyUSB0`, 115200bps.
 
-## 실행 (통합 — main.py)
+## 실행 (통합 조종석 — main.py)
 
 ```bash
 cd ~/GitHub/wheelchair-auto-parking-system/src/v2_vision/jetson_nano
 python3 main.py        # 모델 경로 생략 시 camera/best_v5_poster.pt 사용
 ```
 
-카메라(YOLO 검출)와 ESP32(초음파 텔레메트리 수신)를 한 프로세스에서 같이 돌림.
-터미널에 고정 화면(curses)이 뜨고, 검출 개수·FPS·초음파 5개 값·서보 현재각이
-실시간으로 갱신됨. A/D/W/S로 서보(조이스틱) 수동 조작, `q`로 종료.
+**키: A/D/W/S = 서보 수동 조작 | G = 자동모드 토글 | Q = 종료**
 
-- HDMI 모니터에는 검출 박스가 그려진 카메라 창이 같이 뜸 (`--no-show`로 끄면 터미널 화면만)
-- ESP32가 안 붙어있으면 `--no-servo`로 카메라만 테스트 가능
-- 그 외 옵션은 `python3 main.py --help`
+- **수동 모드(기본)**: A/D/W/S로 서보(조이스틱) 직접 조작
+- **자동 모드(G)**: guidance 판단기가 teach로 저장한 goal을 향해 서보를 스스로
+  조작. **자동 중 아무 이동키나 누르면 즉시 수동 복귀 + 정지** (비상 개입).
+  goal 파일이 없으면 자동모드는 비활성 (화면에 사유 표시)
+- **터미널(curses)**: 검출/FPS, 자동모드 지시·판단근거(du/scale/sonarErr)·전송각,
+  초음파 5개, 서보 에코, 수신시간을 실시간 표시
+- **HDMI 카메라 창**: 검출 박스 + 목표 ✕마커 + 현재 앵커 ○ + 자동모드 지시 배너 +
+  오른쪽에 미니맵(CAR·목표·현재위치 추정). 기본 절반 크기(`--display-scale 0.5`),
+  `--no-show`로 끄기 가능
+- ESP32가 안 붙어있으면 `--no-servo`로 카메라만 테스트. 그 외 `--help`
+- 자동모드 서보 방향이 반대면 `--invert-x`/`--invert-y`, 편향각은
+  `--turn-deg`/`--drive-deg` (기본 ±10°)
 
 시작 직후 "모델 워밍업 중..."이 30초~1분 정도 뜨는 건 정상 (젯슨 첫 추론 특성).
 워밍업이 끝나야 터미널 화면으로 전환됨.
@@ -118,14 +125,17 @@ python3 main.py        # 모델 경로 생략 시 camera/best_v5_poster.pt 사�
 ## 자동 정렬 (guidance/)
 
 teach & repeat 방식: `teach.py`로 목표 상태(사이드미러 위치·크기 + 측면 초음파 쌍 +
-지도에 클릭한 목표 좌표)를 JSON으로 저장해두고, `guide.py`가 현재 상태와 비교해
-"TURN LEFT / MOVE FORWARD / ALIGNED - STOP" 지시를 화면에 표시함 (모터 출력 없음).
+지도에 클릭한 목표 좌표)를 JSON으로 저장해두면, 판단기(`common.AlignmentPlanner`)가
+현재 상태와 비교해 "TURN LEFT / MOVE FORWARD / ALIGNED - STOP" 지시를 만듦.
 ①VISION 단계(사이드미러 정렬) → ②SONAR 단계(측면 초음파 앞/뒤 차이로 평행 정렬) 순서.
 
+**판단기는 main.py 자동모드(G키)와 guide.py가 공유** — 평소엔 main.py G키가
+주 사용 경로고, guide.py는 guidance만 따로 돌리고 싶을 때의 단독 진입점.
+
 ```bash
-python3 guidance/teach.py            # 지도 패널 클릭으로 목표 지정, s 저장, q 종료
-python3 guidance/guide.py            # 지시 화면 표시만 (기본, 안전)
-python3 guidance/guide.py --drive    # 지시를 서보(조이스틱)로 실제 전송 — 자동 구동
+python3 guidance/teach.py            # (선행 필수) 목표 저장: 지도 클릭 + s, q 종료
+python3 guidance/guide.py            # 단독 실행: 지시 화면 표시만 (기본, 안전)
+python3 guidance/guide.py --drive    # 단독 실행 + 서보(조이스틱) 실제 구동
 ```
 
 `--drive` 모드: TURN/MOVE 지시가 서보 X/Y 편향(기본 ±10°, `--turn-deg`/`--drive-deg`)으로
