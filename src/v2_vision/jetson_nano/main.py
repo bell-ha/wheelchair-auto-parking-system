@@ -48,8 +48,12 @@ SERVO_MAX_DEG = 180.0
 INITIAL_SERVO_X_DEG = 90.0
 INITIAL_SERVO_Y_DEG = 90.0
 
-# UI 스레드 주기 (키 입력 체크 + 화면 갱신)
+# UI 스레드 주기 (키 입력 체크)
 LOOP_DT = 0.03  # 약 33 Hz
+
+# 화면 갱신 주기 — 33Hz로 전체 화면을 다시 그리면 CPU를 꽤 먹어서(YOLO 처리율까지
+# 깎아먹는 것으로 실측됨) 키 폴링과 분리해 10Hz로만 갱신
+DRAW_INTERVAL = 0.1
 
 # 같은 키가 눌려있을 때 너무 빠르게 변하지 않도록 제한
 COMMAND_INTERVAL = 0.05
@@ -226,6 +230,7 @@ def ui_loop(stdscr, ser, shared, args):
     target_x = INITIAL_SERVO_X_DEG
     target_y = INITIAL_SERVO_Y_DEG
     last_cmd_time = 0.0
+    last_draw = 0.0
 
     while not shared.stop.is_set():
         now = time.time()
@@ -269,8 +274,10 @@ def ui_loop(stdscr, ser, shared, args):
                 shared.request_stop(f"ESP32 시리얼 연결 끊김(수신): {e}")
                 break
 
-        # 3. 화면 그리기
-        draw_screen(stdscr, tel, target_x, target_y, shared, args)
+        # 3. 화면 그리기 (키 폴링보다 낮은 10Hz — 33Hz 전체 갱신은 CPU 낭비)
+        if now - last_draw >= DRAW_INTERVAL:
+            draw_screen(stdscr, tel, target_x, target_y, shared, args)
+            last_draw = now
 
         time.sleep(LOOP_DT)
 
@@ -331,6 +338,10 @@ def main():
     ap.add_argument("--imgsz", type=int, default=640)
     ap.add_argument("--cam-width", type=int, default=1280)
     ap.add_argument("--cam-height", type=int, default=720)
+    # 30fps로 받으면 GStreamer 디코딩 스레드가 코어 하나를 통째로 먹으면서(실측 91%)
+    # YOLO에 갈 CPU를 뺏음 — 추론이 어차피 초당 십수 장이라 15fps로 충분 (C920 지원값)
+    ap.add_argument("--cam-fps", type=int, default=15,
+                     help="카메라 프레임레이트 (C920 지원: 5/10/15/20/25/30)")
     ap.add_argument("--no-show", action="store_true", help="카메라 창 없이 터미널 화면만")
     ap.add_argument("--serial-port", default="/dev/ttyUSB0")
     ap.add_argument("--serial-baud", type=int, default=SERIAL_BAUD)
@@ -344,9 +355,12 @@ def main():
     model = YOLO(args.model)
 
     if args.csi:
-        cap = cv2.VideoCapture(csi_pipeline(args.cam_width, args.cam_height), cv2.CAP_GSTREAMER)
+        cap = cv2.VideoCapture(
+            csi_pipeline(args.cam_width, args.cam_height, args.cam_fps), cv2.CAP_GSTREAMER)
     else:
-        cap = cv2.VideoCapture(usb_pipeline(args.cam, args.cam_width, args.cam_height), cv2.CAP_GSTREAMER)
+        cap = cv2.VideoCapture(
+            usb_pipeline(args.cam, args.cam_width, args.cam_height, args.cam_fps),
+            cv2.CAP_GSTREAMER)
     if not cap.isOpened():
         sys.exit("카메라를 열 수 없음 (--cam 인덱스 또는 --csi 여부 확인)")
 
