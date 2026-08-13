@@ -10,17 +10,14 @@ jetson_nano/
 │   ├── camera.py                  #   GStreamer 파이프라인 + Webcam (16:9/15fps 규칙 문서화)
 │   └── esp32.py                   #   시리얼 프로토콜 한 벌 (텔레메트리 수신 + 서보 송신)
 ├── camera/
-│   ├── live_camera.py             # 카메라 단독 실행/부하테스트용 (독립 스냅샷, hardware/ 안 씀)
 │   └── best_v5_poster.pt          # 최신 모델
 ├── ultrasound/
-│   ├── sample.ino                 # ESP32 펌웨어: 초음파 5개 + 서보 2축(팬/틸트), JSON 프로토콜
-│   └── test_sample.py             # 수동 조작용 curses 툴 (A/D/W/S로 서보, 텔레메트리 화면표시)
+│   └── sample.ino                 # ESP32 펌웨어: 초음파 5개 + 서보 2축, JSON 프로토콜
 ├── guidance/
 │   ├── teach.py                   # 목표 상태 저장 툴 (카메라+초음파 보면서 지도 클릭, s로 저장)
-│   ├── guide.py                   # 사람-가이드 정렬: TURN LEFT 등 지시 표시 (모터 출력 없음)
-│   └── common.py                  # guidance 공용 (카메라/시리얼 파서/앵커 추출/좌표 추정)
-├── unused/                        # 지금 안 쓰는 코드 (이유는 unused/README.md 참고)
-│   └── joystick/                  # 휠체어 주행 방향 제어 — 받아줄 펌웨어가 아직 없음
+│   ├── guide.py                   # 판단: 정렬 지시 표시, --drive면 서보(조이스틱) 자동 구동
+│   └── common.py                  # guidance 공용 (앵커 추출/좌표 추정/goal 저장·로드)
+├── unused/                        # 대체된 코드 보관 (이유는 unused/README.md 참고)
 ├── requirements.txt
 └── README.md
 ```
@@ -28,8 +25,6 @@ jetson_nano/
 **구조 (3층):** 카메라/ESP32 접근 코드는 `hardware/` 공용 계층 한 벌뿐이고,
 그 위에 사람조종용(`main.py`)과 판단용(`guidance/`)이 올라감 — 카메라 설정이나
 시리얼 프로토콜이 바뀌면 `hardware/`(+펌웨어) 한 곳만 고치면 전체 반영됨.
-`camera/live_camera.py`와 `ultrasound/test_sample.py`는 hardware/ 이전의 독립
-스냅샷으로, 각 부품 단독 점검용으로만 남겨둠.
 
 ## 젯슨 접속 (SSH)
 
@@ -96,12 +91,12 @@ Jetson과 ESP32는 USB 케이블로 직결, 포트는 `/dev/ttyUSB0`, 115200bps.
 
 ```bash
 cd ~/GitHub/wheelchair-auto-parking-system/src/v2_vision/jetson_nano
-python3 main.py camera/best_v5_poster.pt --cam-width 1280 --cam-height 720
+python3 main.py        # 모델 경로 생략 시 camera/best_v5_poster.pt 사용
 ```
 
 카메라(YOLO 검출)와 ESP32(초음파 텔레메트리 수신)를 한 프로세스에서 같이 돌림.
-터미널에 `test_sample.py`와 같은 스타일의 고정 화면(curses)이 뜨고, 검출 개수·FPS·
-초음파 5개 값·서보 현재각이 실시간으로 갱신됨. `q`로 종료.
+터미널에 고정 화면(curses)이 뜨고, 검출 개수·FPS·초음파 5개 값·서보 현재각이
+실시간으로 갱신됨. A/D/W/S로 서보(조이스틱) 수동 조작, `q`로 종료.
 
 - HDMI 모니터에는 검출 박스가 그려진 카메라 창이 같이 뜸 (`--no-show`로 끄면 터미널 화면만)
 - ESP32가 안 붙어있으면 `--no-servo`로 카메라만 테스트 가능
@@ -115,32 +110,12 @@ python3 main.py camera/best_v5_poster.pt --cam-width 1280 --cam-height 720
 화각이 좁아짐. 1920x1080은 화면은 더 선명하지만 이 보드(RAM 4GB) 기준 메모리 여유가
 빠듯해서(스왑 발생 확인됨) 1280x720 권장.
 
-## 카메라만 단독 실행 (live_camera.py)
-
-부하 테스트나 카메라 단독 점검용. `main.py`와 옵션 동일.
-
-```bash
-python3 camera/live_camera.py camera/best_v5_poster.pt --cam-width 1280 --cam-height 720
-```
-
-SSH/VSCode 원격 터미널로 실행해도 젯슨 본체 HDMI 모니터(:0)에 알아서 창이 뜸.
-시작하고 "모델 워밍업 중..."이 최대 1분 정도 뜨는 건 정상 (멈춘 게 아님).
-
-부하 확인은 다른 터미널에서 `sudo tegrastats` 병행 권장 (GPU 사용률·온도·스로틀링 확인).
+부품 단독 점검: 카메라만 → `main.py --no-servo`, ESP32만(카메라 없이) →
+`unused/test_sample.py` 꺼내 쓰기 (자세한 건 unused/README.md).
+부하 확인은 다른 터미널에서 `sudo tegrastats` 병행 권장 (GPU 사용률·온도·스로틀링).
 자세한 결과는 [../jetson_부하테스트_보고서.md](../jetson_부하테스트_보고서.md) 참고.
 
-## 초음파+서보 수동 조작/점검 (test_sample.py)
-
-A/D = 서보 X, W/S = 서보 Y, Q = 종료. 초음파 5개(정면/좌전/좌후/우전/우후) 텔레메트리도
-화면에 같이 표시됨. ESP32 연결 상태를 빠르게 점검하고 싶을 때 이걸로.
-
-```bash
-python3 ultrasound/test_sample.py
-```
-
-포트는 파일 상단 `SERIAL_PORT`(`/dev/ttyUSB0`) 수정.
-
-## 사람-가이드 정렬 (guidance/)
+## 자동 정렬 (guidance/)
 
 teach & repeat 방식: `teach.py`로 목표 상태(사이드미러 위치·크기 + 측면 초음파 쌍 +
 지도에 클릭한 목표 좌표)를 JSON으로 저장해두고, `guide.py`가 현재 상태와 비교해
@@ -158,7 +133,7 @@ python3 guidance/guide.py --drive    # 지시를 서보(조이스틱)로 실제 
 **첫 구동 테스트는 반드시 휠체어 전원을 끄거나 바퀴를 띄운 상태에서** 서보가
 의도한 방향으로 움직이는지 확인하고, 반대로 움직이면 `--invert-x`/`--invert-y`로 보정.
 
-- 카메라·시리얼을 main.py/test_sample.py와 공유하므로 **동시 실행 불가**
+- 카메라·시리얼을 main.py와 공유하므로 **동시 실행 불가**
 - 초음파 기준 거리(SONAR_BASELINE=0.315m)는 `sample.ino`의 `SIDE_SENSOR_SPACING_CM=31.5`와
   맞춰둔 값 — 센서 간격을 바꾸면 양쪽 다 수정할 것
 
