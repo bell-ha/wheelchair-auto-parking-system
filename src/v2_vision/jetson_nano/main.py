@@ -28,8 +28,12 @@ import serial
 
 # TensorRT 8.0 파이썬 바인딩이 구식 np.bool을 참조 (numpy 1.24+에서 제거됨).
 # .engine 모델을 로드하려면 ultralytics가 tensorrt를 import하기 전에 별칭 복원 필요.
-if not hasattr(np, "bool"):
-    np.bool = bool
+# (hasattr 검사만으로도 numpy가 FutureWarning을 찍어서 잠시 꺼둠)
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", FutureWarning)
+    if not hasattr(np, "bool"):
+        np.bool = bool
 
 from ultralytics import YOLO
 
@@ -331,7 +335,10 @@ def run(stdscr, cap, model, ser, args):
 
 def main():
     ap = argparse.ArgumentParser(description="카메라+초음파/서보 통합 실행")
-    ap.add_argument("model")
+    default_model = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "camera", "best_v5_poster.pt")
+    ap.add_argument("model", nargs="?", default=default_model,
+                    help="모델 경로 (기본: camera/best_v5_poster.pt)")
     ap.add_argument("--cam", type=int, default=0)
     ap.add_argument("--csi", action="store_true")
     ap.add_argument("--conf", type=float, default=0.25)
