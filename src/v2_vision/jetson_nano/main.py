@@ -36,8 +36,10 @@ from ultralytics import YOLO
 
 from hardware.camera import Webcam, ensure_display, DEFAULT_FPS
 from hardware.esp32 import ESP32Link, DEFAULT_PORT, DEFAULT_BAUD
-from guidance.common import (AlignmentPlanner, FeatureSmoother, STABLE_FRAMES,
-                             anchor_from_result, load_goal, servo_targets)
+from guidance.common import (MAP_WIDTH, STABLE_FRAMES, AlignmentPlanner,
+                             FeatureSmoother, anchor_from_result,
+                             draw_top_view, load_goal, relative_estimate,
+                             scaled_goal_feature, servo_targets)
 
 
 # ======================================================
@@ -322,14 +324,19 @@ def run(stdscr, cam, model, link, planner, shared, args):
         shared.fps = len(recent) / sum(recent) if sum(recent) > 0 else 0.0
         shared.n_detections = len(res.boxes)
 
-        # 자동모드 판단 (서보 전송은 UI 스레드가 함)
+        # 앵커/초음파는 goal이 있으면 항상 계산 (지도·마커 표시용, 추론 재사용이라 저렴)
         mode = shared.mode
-        if mode == "AUTO" and planner is not None:
-            if prev_mode != "AUTO":        # 방금 자동모드 진입 → 상태 초기화
+        feature = None
+        sonar = None
+        if planner is not None:
+            if mode == "AUTO" and prev_mode != "AUTO":   # 자동모드 진입 → 초기화
                 planner.reset()
                 smoother.value = None
             feature = smoother.update(anchor_from_result(res, anchor))
             sonar = link.side_pair_m(side) if link is not None else None
+
+        # 자동모드 판단 (서보 전송은 UI 스레드가 함)
+        if mode == "AUTO" and planner is not None:
             plan = planner.update(feature, sonar, frame.shape)
             shared.plan = plan
             shared.auto_target = servo_targets(
@@ -341,7 +348,43 @@ def run(stdscr, cam, model, link, planner, shared, args):
         prev_mode = mode
 
         if not args.no_show:
-            cv2.imshow("main", res.plot())
+            out = res.plot()
+            if planner is not None:
+                # guide.py와 같은 시각 요소: 목표 마커 / 현재 앵커 / 지시 배너 / 미니맵
+                goal_f = scaled_goal_feature(planner.goal, frame.shape)
+                cv2.drawMarker(out, (int(goal_f["u"]), int(goal_f["v"])),
+                               (255, 0, 255), cv2.MARKER_TILTED_CROSS, 16, 2)
+                if feature:
+                    cv2.circle(out, (int(feature["u"]), int(feature["v"])),
+                               7, (0, 255, 0), 2)
+                plan = shared.plan
+                if plan is not None:
+                    cv2.rectangle(out, (0, 0), (out.shape[1], 44),
+                                  (20, 20, 20), -1)
+                    cv2.putText(out, plan["text"], (12, 32),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, plan["color"], 2)
+                estimate = (relative_estimate(planner.goal, feature, sonar,
+                                              frame.shape[1], args.hfov)
+                            if feature is not None and sonar is not None
+                            else None)
+                panel = draw_top_view(
+                    out.shape[0], pose=estimate,
+                    target=planner.goal["taught_relative_pose"],
+                    width=MAP_WIDTH)
+                if estimate:
+                    cv2.putText(panel, f"x={estimate['x']:+.2f}m", (6, 22),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.43, (255, 255, 255), 1)
+                    cv2.putText(panel, f"y~={estimate['y_proxy']:+.2f}m", (6, 42),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.43, (255, 255, 255), 1)
+                    yaw_deg = estimate["yaw"] * 180.0 / 3.141592653589793
+                    cv2.putText(panel, f"yaw={yaw_deg:+.1f}deg", (6, 62),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.43, (255, 255, 255), 1)
+                out = np.hstack((out, panel))
+            if args.display_scale != 1.0:
+                # 작은 모니터용: 표시만 축소 (캡처/추론 해상도는 그대로)
+                out = cv2.resize(out, None, fx=args.display_scale,
+                                 fy=args.display_scale)
+            cv2.imshow("main", out)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 shared.request_stop("사용자 종료 (q, 카메라 창)")
                 break
@@ -380,6 +423,10 @@ def main():
                     help="자동모드 좌/우가 반대로 움직이면 지정")
     ap.add_argument("--invert-y", action="store_true",
                     help="자동모드 전/후가 반대로 움직이면 지정")
+    # C920 수평 화각: 16:9에서 약 70.4도(=1.229rad) — 지도 위치 추정에 사용
+    ap.add_argument("--hfov", type=float, default=1.229)
+    ap.add_argument("--display-scale", type=float, default=1.0,
+                    help="카메라+지도 창 배율 (작은 모니터면 0.5 등, 추론엔 영향 없음)")
     args = ap.parse_args()
 
     if not args.no_show:
