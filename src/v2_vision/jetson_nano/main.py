@@ -1,15 +1,16 @@
-"""통합 실행: ultrasound/test_sample.py 화면/조작 그대로 + 카메라(YOLO 검출)를 얹음.
+"""통합 조종석: 카메라(YOLO) + 초음파 + 서보(조이스틱)를 한 프로세스·한 화면에서.
 
-- 터미널: test_sample.py와 동일한 curses 화면 (A/D/W/S로 서보 조작, 초음파 텔레메트리 표시)
-  거기에 < Vision > 섹션(검출 개수 / YOLO FPS)이 추가됨
-- HDMI 모니터: 검출 박스가 그려진 카메라 창 (--no-show로 끄면 터미널 화면만)
+- 수동 모드: A/D/W/S로 서보 직접 조작 (기본)
+- 자동 모드: G 키 — guidance의 판단기(AlignmentPlanner)가 teach로 저장한 goal을
+  향해 서보를 스스로 조작. **아무 이동키나 누르면 즉시 수동 복귀 + 정지** (비상 개입)
+- 터미널(curses): 검출/FPS, 자동모드 지시·근거, 초음파 5개, 서보 에코를 실시간 표시
+- HDMI: 검출 박스 카메라 창 (--no-show로 끄기)
 
-스레드 구조 (YOLO가 느려도 키 반응/화면이 안 묶이게 분리):
-- UI 스레드(~33Hz): 키 입력 → 서보 명령 송신, 시리얼 텔레메트리 수신, 화면 그리기(10Hz)
-- 메인 스레드: 카메라 프레임 읽기 + YOLO 추론 + (옵션) cv2 카메라 창
+계층 구조: hardware/(카메라·ESP32 접근) 위에 이 파일(사람조종+조종석)과
+guidance/(판단·goal 관리)가 올라가고, 자동모드는 guidance 판단기를 import해서 씀.
 
-카메라/ESP32 하드웨어 코드는 hardware/ 공용 계층을 사용 (guidance/와 같은 모듈).
-카메라·초음파 값을 엮어서 서보를 자동으로 움직이는 판단 로직은 아직 없음.
+스레드: UI 스레드(~33Hz: 키/시리얼/화면) + 메인 스레드(카메라+YOLO+판단).
+시리얼 송신은 UI 스레드만 수행 (자동모드에서도 메인은 목표각만 계산해서 넘김).
 """
 import argparse
 import curses
@@ -35,29 +36,23 @@ from ultralytics import YOLO
 
 from hardware.camera import Webcam, ensure_display, DEFAULT_FPS
 from hardware.esp32 import ESP32Link, DEFAULT_PORT, DEFAULT_BAUD
+from guidance.common import (AlignmentPlanner, FeatureSmoother, STABLE_FRAMES,
+                             anchor_from_result, load_goal, servo_targets)
 
 
 # ======================================================
-# Config (test_sample.py와 동일)
+# Config
 # ======================================================
 
 SERVO_STEP_DEG = 0.5
-
 SERVO_MIN_DEG = 0.0
 SERVO_MAX_DEG = 180.0
+SERVO_CENTER = 90.0
 
-INITIAL_SERVO_X_DEG = 90.0
-INITIAL_SERVO_Y_DEG = 90.0
-
-# UI 스레드 주기 (키 입력 체크)
-LOOP_DT = 0.03  # 약 33 Hz
-
-# 화면 갱신 주기 — 33Hz로 전체 화면을 다시 그리면 CPU를 꽤 먹어서(YOLO 처리율까지
-# 깎아먹는 것으로 실측됨) 키 폴링과 분리해 10Hz로만 갱신
-DRAW_INTERVAL = 0.1
-
-# 같은 키가 눌려있을 때 너무 빠르게 변하지 않도록 제한
-COMMAND_INTERVAL = 0.05
+LOOP_DT = 0.03            # UI 스레드 주기 (키 입력 체크, 약 33Hz)
+DRAW_INTERVAL = 0.1       # 화면 갱신 10Hz (33Hz 전체 갱신은 CPU 낭비 — 실측)
+COMMAND_INTERVAL = 0.05   # 수동 키 연타 시 전송 최소 간격
+AUTO_KEEPALIVE = 0.5      # 자동모드: 같은 목표각이라도 이 주기마다 재전송
 
 
 def clamp(value, lo, hi):
@@ -69,10 +64,10 @@ def clamp(value, lo, hi):
 # ======================================================
 
 class Shared:
-    """메인(YOLO) ↔ UI 스레드가 주고받는 최소한의 상태.
+    """메인(YOLO+판단) ↔ UI 스레드가 주고받는 상태.
 
-    n_detections/fps는 단순 스칼라 대입이라 GIL 하에서 별도 락 없이 안전.
-    종료는 stop 이벤트 하나로 양방향 전파 (먼저 사유를 적은 쪽이 이김).
+    스칼라/튜플/dict 참조 대입이라 GIL 하에서 별도 락 없이 안전.
+    종료는 stop 이벤트 하나로 양방향 전파.
     """
 
     def __init__(self):
@@ -80,6 +75,12 @@ class Shared:
         self.stop_reason = None
         self.n_detections = 0
         self.fps = 0.0
+        # 자동모드
+        self.mode = "MANUAL"          # 'MANUAL' | 'AUTO' (UI 스레드가 전환)
+        self.auto_available = False   # goal 로드 성공 여부
+        self.goal_msg = ""            # goal 상태 안내문
+        self.plan = None              # 판단기 최신 출력 dict (표시용)
+        self.auto_target = None       # 자동모드 서보 목표 (x, y)
 
     def request_stop(self, reason):
         if not self.stop.is_set():
@@ -88,10 +89,10 @@ class Shared:
 
 
 # ======================================================
-# 터미널 화면 (test_sample.py의 draw_screen과 동일 + Vision 섹션)
+# 터미널 화면
 # ======================================================
 
-def fmt(value, unit="", width=8) -> str:
+def fmt(value, unit="", width=6) -> str:
     if value is None:
         return f"{'---':>{width}}{unit}"
     try:
@@ -119,50 +120,64 @@ def draw_screen(stdscr, tel, rx_age, target_x, target_y, shared, args):
 
     port = "미사용" if args.no_servo else args.serial_port
 
-    safe_addstr(stdscr, 0, 0, "Jetson Nano 통합 실행 (Camera + Ultrasonic + Servo)")
-    safe_addstr(stdscr, 1, 0, "Keys: A/D = Servo X, W/S = Servo Y, Q = quit")
+    safe_addstr(stdscr, 0, 0, "Jetson Nano 통합 조종석 (Camera + Ultrasonic + Servo)")
+    safe_addstr(stdscr, 1, 0,
+                "Keys: A/D=서보X  W/S=서보Y  G=자동모드 토글  Q=종료")
     safe_addstr(stdscr, 2, 0,
-                f"Port: {port} | Baud: {args.serial_baud} | Step: {SERVO_STEP_DEG:.1f} deg")
+                f"Camera: /dev/video{args.cam} ({args.cam_width}x{args.cam_height})"
+                f" | ESP32: {port}")
 
     safe_addstr(stdscr, 4, 0, "< Vision >")
     safe_addstr(stdscr, 5, 0,
-                f"Camera: /dev/video{args.cam} ({args.cam_width}x{args.cam_height})")
-    safe_addstr(stdscr, 6, 0,
                 f"검출: {shared.n_detections}개 | YOLO {shared.fps:.1f} FPS")
 
-    safe_addstr(stdscr, 8, 0, "< Command Target >")
-    safe_addstr(stdscr, 9, 0, f"Servo X target: {target_x:8.1f} deg")
-    safe_addstr(stdscr, 10, 0, f"Servo Y target: {target_y:8.1f} deg")
+    # 자동모드 섹션
+    safe_addstr(stdscr, 7, 0, "< Auto >")
+    if shared.mode == "AUTO":
+        mode_line = "모드: ★ AUTO — 아무 이동키나 누르면 즉시 수동 복귀+정지"
+    elif shared.auto_available:
+        mode_line = "모드: MANUAL (G 키로 자동 시작)"
+    else:
+        mode_line = f"모드: MANUAL — {shared.goal_msg}"
+    safe_addstr(stdscr, 8, 0, mode_line)
 
-    safe_addstr(stdscr, 12, 0, "< ESP32 Servo State >")
-    safe_addstr(stdscr, 13, 0, f"Servo X current: {fmt(tel.get('servo_x'), ' deg')}")
-    safe_addstr(stdscr, 14, 0, f"Servo Y current: {fmt(tel.get('servo_y'), ' deg')}")
+    plan = shared.plan
+    if plan is not None:
+        safe_addstr(stdscr, 9, 0,
+                    f"지시: {plan['text']}  (phase={plan['phase']} "
+                    f"stable={plan['stable']}/{STABLE_FRAMES})")
+        detail = (f"du={fmt(plan['du'])} scale={fmt(plan['scale'])} "
+                  f"sonarErr={fmt(plan['sonar_err'], 'm')}")
+        if shared.auto_target is not None:
+            detail += (f" | 전송 x={shared.auto_target[0]:.0f}"
+                       f" y={shared.auto_target[1]:.0f}")
+        safe_addstr(stdscr, 10, 0, detail)
+    else:
+        safe_addstr(stdscr, 9, 0, "지시: (자동모드 아님)")
 
-    safe_addstr(stdscr, 16, 0, "< Ultrasonic >")
-    safe_addstr(stdscr, 17, 0, f"Front distance: {fmt(tel.get('front'), ' cm')}")
+    safe_addstr(stdscr, 12, 0, "< Servo >")
+    safe_addstr(stdscr, 13, 0,
+                f"수동 목표: X {target_x:6.1f}  Y {target_y:6.1f}   |   "
+                f"에코(펌웨어 적용값): X {fmt(tel.get('servo_x'))}"
+                f"  Y {fmt(tel.get('servo_y'))}")
 
-    safe_addstr(stdscr, 19, 0, "< Left Side >")
-    safe_addstr(stdscr, 20, 0, f"L_FRONT: {fmt(tel.get('left_front'), ' cm')}")
-    safe_addstr(stdscr, 21, 0, f"L_REAR : {fmt(tel.get('left_rear'), ' cm')}")
-    safe_addstr(stdscr, 22, 0, f"L_DIST : {fmt(tel.get('left_dist'), ' cm')}")
-    safe_addstr(stdscr, 23, 0, f"L_ANGLE: {fmt(tel.get('left_angle'), ' deg')}")
+    safe_addstr(stdscr, 15, 0, "< Ultrasonic (cm) >")
+    safe_addstr(stdscr, 16, 0, f"Front: {fmt(tel.get('front'))}")
+    safe_addstr(stdscr, 17, 0,
+                f"L  f {fmt(tel.get('left_front'))}  r {fmt(tel.get('left_rear'))}"
+                f"  d {fmt(tel.get('left_dist'))}  a {fmt(tel.get('left_angle'))}")
+    safe_addstr(stdscr, 18, 0,
+                f"R  f {fmt(tel.get('right_front'))}  r {fmt(tel.get('right_rear'))}"
+                f"  d {fmt(tel.get('right_dist'))}  a {fmt(tel.get('right_angle'))}")
 
-    safe_addstr(stdscr, 25, 0, "< Right Side >")
-    safe_addstr(stdscr, 26, 0, f"R_FRONT: {fmt(tel.get('right_front'), ' cm')}")
-    safe_addstr(stdscr, 27, 0, f"R_REAR : {fmt(tel.get('right_rear'), ' cm')}")
-    safe_addstr(stdscr, 28, 0, f"R_DIST : {fmt(tel.get('right_dist'), ' cm')}")
-    safe_addstr(stdscr, 29, 0, f"R_ANGLE: {fmt(tel.get('right_angle'), ' deg')}")
-
-    safe_addstr(stdscr, 31, 0, f"Last ESP32 RX: {fmt(rx_age, ' s')} ago")
-
-    safe_addstr(stdscr, 33, 0, "< Last raw line >")
-    safe_addstr(stdscr, 34, 0, str(tel.get("_last_raw", ""))[:110])
+    safe_addstr(stdscr, 20, 0, f"Last ESP32 RX: {fmt(rx_age, ' s')} ago")
+    safe_addstr(stdscr, 21, 0, "raw: " + str(tel.get("_last_raw", ""))[:100])
 
     stdscr.refresh()
 
 
 # ======================================================
-# UI 스레드: 키 입력 + 시리얼 + 화면 (~33Hz, test_sample.py와 동일한 반응속도)
+# UI 스레드: 키 입력 + 시리얼 + 화면 (~33Hz)
 # ======================================================
 
 def ui_loop(stdscr, link, shared, args):
@@ -175,46 +190,83 @@ def ui_loop(stdscr, link, shared, args):
 
 
 def _ui_loop(stdscr, link, shared, args):
-    target_x = INITIAL_SERVO_X_DEG
-    target_y = INITIAL_SERVO_Y_DEG
+    target_x = SERVO_CENTER
+    target_y = SERVO_CENTER
     last_cmd_time = 0.0
     last_draw = 0.0
+    last_auto_sent = None
+    last_auto_time = 0.0
+
+    def send(x, y):
+        if link is None:
+            return True
+        try:
+            link.send_servo(x, y)
+            return True
+        except (serial.SerialException, OSError) as e:
+            shared.request_stop(f"ESP32 시리얼 연결 끊김(송신): {e}")
+            return False
+
+    def exit_auto():
+        """자동 → 수동 복귀. 안전을 위해 무조건 중앙(정지)으로."""
+        nonlocal target_x, target_y, last_auto_sent
+        shared.mode = "MANUAL"
+        shared.auto_target = None
+        target_x = target_y = SERVO_CENTER
+        last_auto_sent = None
+        send(SERVO_CENTER, SERVO_CENTER)
 
     while not shared.stop.is_set():
         now = time.time()
 
-        # 1. 키보드 입력 → 서보 목표각 (test_sample.py와 동일)
+        # 1. 키보드 입력
         key = stdscr.getch()
         changed = False
 
-        if key != -1 and now - last_cmd_time >= COMMAND_INTERVAL:
+        if key != -1:
             if key in (ord("q"), ord("Q")):
                 shared.request_stop("사용자 종료 (q)")
                 break
-            elif key in (ord("a"), ord("A")):
-                target_x -= SERVO_STEP_DEG
-                changed = True
-            elif key in (ord("d"), ord("D")):
-                target_x += SERVO_STEP_DEG
-                changed = True
-            elif key in (ord("w"), ord("W")):
-                target_y += SERVO_STEP_DEG
-                changed = True
-            elif key in (ord("s"), ord("S")):
-                target_y -= SERVO_STEP_DEG
-                changed = True
+            elif key in (ord("g"), ord("G")):
+                if shared.mode == "AUTO":
+                    exit_auto()
+                elif shared.auto_available:
+                    shared.mode = "AUTO"    # 판단기 리셋은 메인 스레드가 함
+            elif key in (ord("a"), ord("A"), ord("d"), ord("D"),
+                         ord("w"), ord("W"), ord("s"), ord("S")):
+                if shared.mode == "AUTO":
+                    # 자동 주행 중 사람 개입 = 비상정지 (키 자체는 적용 안 함)
+                    exit_auto()
+                elif now - last_cmd_time >= COMMAND_INTERVAL:
+                    if key in (ord("a"), ord("A")):
+                        target_x -= SERVO_STEP_DEG
+                    elif key in (ord("d"), ord("D")):
+                        target_x += SERVO_STEP_DEG
+                    elif key in (ord("w"), ord("W")):
+                        target_y += SERVO_STEP_DEG
+                    else:
+                        target_y -= SERVO_STEP_DEG
+                    target_x = clamp(target_x, SERVO_MIN_DEG, SERVO_MAX_DEG)
+                    target_y = clamp(target_y, SERVO_MIN_DEG, SERVO_MAX_DEG)
+                    changed = True
 
             if changed and link is not None:
-                target_x = clamp(target_x, SERVO_MIN_DEG, SERVO_MAX_DEG)
-                target_y = clamp(target_y, SERVO_MIN_DEG, SERVO_MAX_DEG)
-                try:
-                    link.send_servo(target_x, target_y)
-                except (serial.SerialException, OSError) as e:
-                    shared.request_stop(f"ESP32 시리얼 연결 끊김(송신): {e}")
+                if not send(target_x, target_y):
                     break
                 last_cmd_time = now
 
-        # 2. 시리얼 수신
+        # 2. 자동모드 서보 전송 (메인 스레드가 계산한 목표각)
+        if shared.mode == "AUTO" and link is not None:
+            tgt = shared.auto_target
+            if tgt is not None and (
+                    tgt != last_auto_sent or
+                    now - last_auto_time > AUTO_KEEPALIVE):
+                if not send(*tgt):
+                    break
+                last_auto_sent = tgt
+                last_auto_time = now
+
+        # 3. 시리얼 수신
         tel, rx_age = {}, None
         if link is not None:
             try:
@@ -224,7 +276,7 @@ def _ui_loop(stdscr, link, shared, args):
                 shared.request_stop(f"ESP32 시리얼 연결 끊김(수신): {e}")
                 break
 
-        # 3. 화면 그리기 (키 폴링보다 낮은 10Hz — 33Hz 전체 갱신은 CPU 낭비)
+        # 4. 화면 그리기 (10Hz)
         if now - last_draw >= DRAW_INTERVAL:
             draw_screen(stdscr, tel, rx_age, target_x, target_y, shared, args)
             last_draw = now
@@ -233,17 +285,23 @@ def _ui_loop(stdscr, link, shared, args):
 
 
 # ======================================================
-# 메인 스레드: 카메라 + YOLO
+# 메인 스레드: 카메라 + YOLO + (자동모드) 판단
 # ======================================================
 
-def run(stdscr, cam, model, link, shared, args):
+def run(stdscr, cam, model, link, planner, shared, args):
     """종료 사유를 반환 (curses가 화면을 되돌린 뒤에 출력하려고)."""
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.timeout(1)
 
-    ui = threading.Thread(target=ui_loop, args=(stdscr, link, shared, args), daemon=True)
+    ui = threading.Thread(target=ui_loop, args=(stdscr, link, shared, args),
+                          daemon=True)
     ui.start()
+
+    smoother = FeatureSmoother(alpha=0.35)
+    anchor = planner.goal.get("anchor", "side_mirror") if planner else None
+    side = (planner.goal["sonar"].get("side", "right") if planner else "right")
+    prev_mode = "MANUAL"
 
     loop_times = []
     t_prev = time.time()
@@ -264,6 +322,24 @@ def run(stdscr, cam, model, link, shared, args):
         shared.fps = len(recent) / sum(recent) if sum(recent) > 0 else 0.0
         shared.n_detections = len(res.boxes)
 
+        # 자동모드 판단 (서보 전송은 UI 스레드가 함)
+        mode = shared.mode
+        if mode == "AUTO" and planner is not None:
+            if prev_mode != "AUTO":        # 방금 자동모드 진입 → 상태 초기화
+                planner.reset()
+                smoother.value = None
+            feature = smoother.update(anchor_from_result(res, anchor))
+            sonar = link.side_pair_m(side) if link is not None else None
+            plan = planner.update(feature, sonar, frame.shape)
+            shared.plan = plan
+            shared.auto_target = servo_targets(
+                plan["text"], args.turn_deg, args.drive_deg,
+                args.invert_x, args.invert_y)
+        elif mode == "MANUAL":
+            shared.plan = None
+            shared.auto_target = None
+        prev_mode = mode
+
         if not args.no_show:
             cv2.imshow("main", res.plot())
             if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -275,10 +351,10 @@ def run(stdscr, cam, model, link, shared, args):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="카메라+초음파/서보 통합 실행")
-    default_model = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 "camera", "best_v5_poster.pt")
-    ap.add_argument("model", nargs="?", default=default_model,
+    ap = argparse.ArgumentParser(description="카메라+초음파/서보 통합 조종석")
+    here = os.path.dirname(os.path.abspath(__file__))
+    ap.add_argument("model", nargs="?",
+                    default=os.path.join(here, "camera", "best_v5_poster.pt"),
                     help="모델 경로 (기본: camera/best_v5_poster.pt)")
     ap.add_argument("--cam", type=int, default=0)
     ap.add_argument("--csi", action="store_true")
@@ -292,6 +368,18 @@ def main():
     ap.add_argument("--serial-port", default=DEFAULT_PORT)
     ap.add_argument("--serial-baud", type=int, default=DEFAULT_BAUD)
     ap.add_argument("--no-servo", action="store_true", help="ESP32 없이 카메라만 테스트")
+    # 자동모드 (G 키) — guidance 판단기 사용
+    ap.add_argument("--goal", default=os.path.join(here, "guidance",
+                                                    "real_front_goal.json"),
+                    help="teach.py로 저장한 goal 파일 (자동모드용)")
+    ap.add_argument("--turn-deg", type=float, default=10.0,
+                    help="자동모드 좌/우회전 서보 X 편향각")
+    ap.add_argument("--drive-deg", type=float, default=10.0,
+                    help="자동모드 전/후진 서보 Y 편향각")
+    ap.add_argument("--invert-x", action="store_true",
+                    help="자동모드 좌/우가 반대로 움직이면 지정")
+    ap.add_argument("--invert-y", action="store_true",
+                    help="자동모드 전/후가 반대로 움직이면 지정")
     args = ap.parse_args()
 
     if not args.no_show:
@@ -309,11 +397,22 @@ def main():
     if not args.no_servo:
         try:
             link = ESP32Link(args.serial_port, args.serial_baud)
-            link.send_servo(INITIAL_SERVO_X_DEG, INITIAL_SERVO_Y_DEG)  # 초기 중앙
+            link.send_servo(SERVO_CENTER, SERVO_CENTER)  # 초기 중앙
             print(f"ESP32 연결됨 ({args.serial_port})")
         except serial.SerialException as e:
             print(f"ESP32 연결 실패, 초음파/서보 없이 진행: {e}")
             link = None
+
+    shared = Shared()
+    planner = None
+    try:
+        planner = AlignmentPlanner(load_goal(args.goal))
+        shared.auto_available = True
+        shared.goal_msg = f"goal: {os.path.basename(args.goal)}"
+        print(f"goal 로드됨 ({args.goal}) — G 키로 자동모드 사용 가능")
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        shared.goal_msg = "goal 없음 (guidance/teach.py로 먼저 저장) — 자동모드 비활성"
+        print(f"goal 로드 실패 → 자동모드 비활성: {e}")
 
     # 젯슨 첫 추론은 CUDA 커널 준비로 수십 초 걸림. curses 화면으로 들어가기 전에
     # 미리 소진해야 사용자가 빈 화면만 보며 기다리는 상황을 피할 수 있음.
@@ -324,16 +423,22 @@ def main():
         model.predict(frame, conf=args.conf, imgsz=args.imgsz, iou=0.5, verbose=False)
     print(f"워밍업 완료 ({time.time() - t0:.1f}s) — 화면 전환")
 
-    shared = Shared()
     reason = None
     try:
-        reason = curses.wrapper(run, cam, model, link, shared, args)
+        reason = curses.wrapper(run, cam, model, link, planner, shared, args)
     except KeyboardInterrupt:
         reason = "Ctrl-C 종료"
     finally:
         cam.release()
         cv2.destroyAllWindows()
         if link is not None:
+            # 어떤 경로로 끝나든 조이스틱은 중립(정지)으로 되돌리고 종료
+            try:
+                for _ in range(2):
+                    link.send_servo(SERVO_CENTER, SERVO_CENTER)
+                    time.sleep(0.05)
+            except Exception:
+                pass
             link.close()
 
     # curses가 화면을 원래대로 돌려놓은 뒤에 출력해야 사용자가 볼 수 있음

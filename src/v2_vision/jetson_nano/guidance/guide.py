@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""ROS-free human movement guide for Jetson Nano; no motor output."""
+"""단독 실행용 정렬 가이드 (cv2 창 기반).
+
+판단 로직은 common.AlignmentPlanner에 있고, main.py의 자동모드도 같은
+판단기를 쓴다 — 이 파일은 "guidance만 따로 돌리고 싶을 때"의 진입점.
+기본은 지시 화면 표시만, --drive를 주면 서보(조이스틱)로 실제 전송.
+"""
 
 import argparse
 import math
@@ -13,26 +18,20 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from common import (DEFAULT_GOAL, DEFAULT_MODEL, MAP_WIDTH, FeatureSmoother,
+from common import (DEFAULT_GOAL, DEFAULT_MODEL, MAP_WIDTH, STABLE_FRAMES,
+                    SERVO_CENTER, AlignmentPlanner, FeatureSmoother,
                     SerialSonar, Webcam, draw_telemetry_overlay, draw_top_view,
                     extract_anchor, load_goal, load_model, relative_estimate,
-                    scaled_goal_feature)
+                    scaled_goal_feature, servo_targets)
 
 
-EPS_U = 0.035
-EPS_SCALE = 0.060
-EPS_SONAR_DIFF = 0.035
-STABLE_FRAMES = 8
 CAMERA_FAIL_SECONDS = 5.0
-
-# --drive 모드: 지시를 서보(조이스틱 액추에이터)로 실제 전송할 때의 값들
-SERVO_CENTER = 90.0        # 중앙 = 조이스틱 중립 = 정지
-SERVO_KEEPALIVE = 0.5      # 같은 목표각이라도 이 주기(초)마다 재전송
+SERVO_KEEPALIVE = 0.5      # --drive: 같은 목표각이라도 이 주기(초)마다 재전송
 
 
 class GuideApp:
 
-    WINDOW = 'Jetson Human Alignment Guide - NO MOTOR OUTPUT'
+    WINDOW = 'Jetson Human Alignment Guide'
 
     def __init__(self, args):
         self.args = args
@@ -46,85 +45,23 @@ class GuideApp:
             args.sonar_front_index, args.sonar_rear_index)
         self.model = load_model(args.model)
         self.smoother = FeatureSmoother(alpha=0.35)
-        self.phase = 'VISION'
-        self.stable = 0
+        self.planner = AlignmentPlanner(self.goal)
         self.last_sent = None
         self.last_sent_time = 0.0
         if args.drive:
             print('*** DRIVE MODE: 지시가 서보(조이스틱)로 실제 전송됩니다 ***')
             print('*** 첫 테스트는 반드시 휠체어 전원을 끄거나 바퀴를 띄운 상태로! ***')
 
-    @staticmethod
-    def _direction(value, positive, negative):
-        return positive if value > 0.0 else negative
-
-    def _servo_targets(self, text):
-        """지시 문구 → 서보 목표각. 이동 지시 4개만 편향, 나머지(STOP류/미지)는 중앙=정지.
-
-        어느 방향이 물리적으로 좌/전진인지는 서보-조이스틱 장착 방향에 달렸으므로
-        --invert-x/--invert-y로 현장에서 맞출 것.
-        """
-        x = y = SERVO_CENTER
-        sx = -1.0 if self.args.invert_x else 1.0
-        sy = -1.0 if self.args.invert_y else 1.0
-        if text == 'TURN LEFT':
-            x = SERVO_CENTER - sx * self.args.turn_deg
-        elif text == 'TURN RIGHT':
-            x = SERVO_CENTER + sx * self.args.turn_deg
-        elif text == 'MOVE FORWARD':
-            y = SERVO_CENTER + sy * self.args.drive_deg
-        elif text == 'MOVE BACKWARD':
-            y = SERVO_CENTER - sy * self.args.drive_deg
-        return x, y
-
     def _drive(self, text):
         """--drive일 때만 호출. 목표각이 바뀌었거나 keepalive 주기가 지나면 전송."""
-        x, y = self._servo_targets(text)
+        x, y = servo_targets(text, self.args.turn_deg, self.args.drive_deg,
+                             self.args.invert_x, self.args.invert_y)
         now = time.monotonic()
         if (x, y) != self.last_sent or now - self.last_sent_time > SERVO_KEEPALIVE:
             self.sonar.send_servo(x, y)
             self.last_sent = (x, y)
             self.last_sent_time = now
         return x, y
-
-    def _instruction(self, feature, sonar, image_shape):
-        if feature is None:
-            self.stable = 0
-            return 'STOP - FIND TARGET', (0, 0, 255), None
-        goal_f = scaled_goal_feature(self.goal, image_shape)
-        du = (goal_f['u'] - feature['u']) / (image_shape[1] / 2.0)
-        scale = goal_f['size'] / max(feature['size'], 1e-3) - 1.0
-
-        # Same ordering as the simulator: finish visual IBVS first, then latch
-        # it and use only the side-sonar pair for parallel alignment.
-        if self.phase == 'VISION':
-            vision_ok = abs(du) < EPS_U and abs(scale) < EPS_SCALE
-            self.stable = self.stable + 1 if vision_ok else 0
-            if self.stable >= STABLE_FRAMES:
-                self.phase, self.stable = 'SONAR', 0
-                return 'STOP - IBVS LOCKED', (0, 255, 255), (du, scale, None)
-            if abs(du) >= EPS_U:
-                text = self._direction(du, 'TURN LEFT', 'TURN RIGHT')
-            elif abs(scale) >= EPS_SCALE:
-                text = self._direction(scale, 'MOVE FORWARD', 'MOVE BACKWARD')
-            else:
-                text = 'HOLD STILL'
-            return text, (0, 200, 255), (du, scale, None)
-
-        if sonar is None:
-            self.stable = 0
-            return 'STOP - SONAR INVALID', (0, 0, 255), (du, scale, None)
-        taught = self.goal['sonar']
-        raw_error = ((sonar['front'] - sonar['rear']) -
-                     (taught['front'] - taught['rear']))
-        side_sign = 1.0 if taught.get('side', 'right') == 'right' else -1.0
-        error = side_sign * raw_error
-        sonar_ok = abs(error) < EPS_SONAR_DIFF
-        self.stable = self.stable + 1 if sonar_ok else 0
-        if self.stable >= STABLE_FRAMES:
-            return 'ALIGNED - STOP', (0, 255, 0), (du, scale, error)
-        return self._direction(error, 'TURN LEFT', 'TURN RIGHT'), \
-            (0, 200, 255), (du, scale, error)
 
     def _map(self, estimate, height):
         target = self.goal['taught_relative_pose']
@@ -164,8 +101,8 @@ class GuideApp:
                     self.model, frame, self.anchor, self.args.confidence,
                     self.args.imgsz)
                 feature = self.smoother.update(raw)
-                text, color, errors = self._instruction(
-                    feature, sonar, frame.shape)
+                plan = self.planner.update(feature, sonar, frame.shape)
+                text, color = plan['text'], plan['color']
                 servo_xy = self._drive(text) if self.args.drive else None
                 estimate = (relative_estimate(
                     self.goal, feature, sonar, frame.shape[1], self.args.hfov)
@@ -182,11 +119,12 @@ class GuideApp:
                               (20, 20, 20), -1)
                 cv2.putText(out, text, (12, 35), cv2.FONT_HERSHEY_SIMPLEX,
                             0.9, color, 2)
-                detail = f"phase={self.phase} stable={self.stable}/{STABLE_FRAMES}"
-                if errors:
-                    detail += f" du={errors[0]:+.3f} scale={errors[1]:+.3f}"
-                    if errors[2] is not None:
-                        detail += f" sonarYaw={errors[2]:+.3f}m"
+                detail = (f"phase={self.planner.phase} "
+                          f"stable={self.planner.stable}/{STABLE_FRAMES}")
+                if plan['du'] is not None:
+                    detail += f" du={plan['du']:+.3f} scale={plan['scale']:+.3f}"
+                if plan['sonar_err'] is not None:
+                    detail += f" sonarYaw={plan['sonar_err']:+.3f}m"
                 if servo_xy is not None:
                     detail += f" | DRIVE x={servo_xy[0]:.0f} y={servo_xy[1]:.0f}"
                 else:
@@ -202,7 +140,7 @@ class GuideApp:
                 cv2.imshow(self.WINDOW, shown)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('r'):
-                    self.phase, self.stable = 'VISION', 0
+                    self.planner.reset()
                 elif key == ord('q'):
                     break
         finally:

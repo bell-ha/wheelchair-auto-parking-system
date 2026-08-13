@@ -111,10 +111,12 @@ def load_model(path=DEFAULT_MODEL):
     return YOLO(str(path))
 
 
-def extract_anchor(model, frame, anchor='side_mirror', confidence=0.25,
-                   imgsz=640):
-    result = model.predict(
-        frame, verbose=False, conf=confidence, imgsz=imgsz, iou=0.5)[0]
+def anchor_from_result(result, anchor='side_mirror'):
+    """이미 수행된 YOLO Results에서 앵커 클래스만 뽑아 최고 신뢰도 하나를 반환.
+
+    main.py처럼 predict를 한 번만 돌리고 (검출 개수 표시 + 앵커 추출을)
+    같이 하고 싶을 때 사용.
+    """
     candidates = []
     for box in result.boxes:
         name = result.names[int(box.cls[0])]
@@ -129,6 +131,13 @@ def extract_anchor(model, frame, anchor='side_mirror', confidence=0.25,
             'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
         })
     return max(candidates, key=lambda item: item['conf']) if candidates else None
+
+
+def extract_anchor(model, frame, anchor='side_mirror', confidence=0.25,
+                   imgsz=640):
+    result = model.predict(
+        frame, verbose=False, conf=confidence, imgsz=imgsz, iou=0.5)[0]
+    return anchor_from_result(result, anchor)
 
 
 class FeatureSmoother:
@@ -149,6 +158,125 @@ class FeatureSmoother:
             for key in ('conf', 'x1', 'y1', 'x2', 'y2'):
                 self.value[key] = feature[key]
         return dict(self.value)
+
+
+# ======================================================
+# 정렬 판단기 — guide.py(단독 실행)와 main.py(자동모드) 공용
+# ======================================================
+
+EPS_U = 0.035
+EPS_SCALE = 0.060
+EPS_SONAR_DIFF = 0.035
+STABLE_FRAMES = 8
+
+SERVO_CENTER = 90.0
+
+
+class AlignmentPlanner:
+    """teach로 저장한 goal 대비 현재 상태를 비교해 이동 지시를 내는 상태기계.
+
+    ①VISION 단계: 앵커(사이드미러) 위치·크기를 goal에 맞춤 (IBVS)
+    ②SONAR 단계: 측면 초음파 앞/뒤 차이를 goal과 맞춰 평행 정렬
+
+    update()가 매 프레임 지시 dict를 반환:
+      {'text': 'TURN LEFT', 'color': (B,G,R), 'phase': 'VISION',
+       'stable': 3, 'du': .., 'scale': .., 'sonar_err': ..(SONAR 단계만)}
+    이동 지시는 TURN LEFT/RIGHT, MOVE FORWARD/BACKWARD 4종뿐이고
+    나머지(STOP류/HOLD/ALIGNED)는 전부 "정지"로 해석하면 됨.
+    """
+
+    def __init__(self, goal):
+        self.goal = goal
+        self.phase = 'VISION'
+        self.stable = 0
+
+    def reset(self):
+        self.phase, self.stable = 'VISION', 0
+
+    @staticmethod
+    def _direction(value, positive, negative):
+        return positive if value > 0.0 else negative
+
+    def update(self, feature, sonar, image_shape):
+        out = {'phase': self.phase, 'stable': self.stable,
+               'du': None, 'scale': None, 'sonar_err': None}
+
+        if feature is None:
+            self.stable = 0
+            out.update(text='STOP - FIND TARGET', color=(0, 0, 255),
+                       stable=0)
+            return out
+
+        goal_f = scaled_goal_feature(self.goal, image_shape)
+        du = (goal_f['u'] - feature['u']) / (image_shape[1] / 2.0)
+        scale = goal_f['size'] / max(feature['size'], 1e-3) - 1.0
+        out.update(du=du, scale=scale)
+
+        if self.phase == 'VISION':
+            vision_ok = abs(du) < EPS_U and abs(scale) < EPS_SCALE
+            self.stable = self.stable + 1 if vision_ok else 0
+            out['stable'] = self.stable
+            if self.stable >= STABLE_FRAMES:
+                self.phase, self.stable = 'SONAR', 0
+                out.update(text='STOP - IBVS LOCKED', color=(0, 255, 255))
+                return out
+            if abs(du) >= EPS_U:
+                text = self._direction(du, 'TURN LEFT', 'TURN RIGHT')
+            elif abs(scale) >= EPS_SCALE:
+                text = self._direction(scale, 'MOVE FORWARD', 'MOVE BACKWARD')
+            else:
+                text = 'HOLD STILL'
+            out.update(text=text, color=(0, 200, 255))
+            return out
+
+        # SONAR 단계
+        if sonar is None:
+            self.stable = 0
+            out.update(text='STOP - SONAR INVALID', color=(0, 0, 255),
+                       stable=0, phase=self.phase)
+            return out
+        taught = self.goal['sonar']
+        raw_error = ((sonar['front'] - sonar['rear']) -
+                     (taught['front'] - taught['rear']))
+        side_sign = 1.0 if taught.get('side', 'right') == 'right' else -1.0
+        error = side_sign * raw_error
+        out['sonar_err'] = error
+        sonar_ok = abs(error) < EPS_SONAR_DIFF
+        self.stable = self.stable + 1 if sonar_ok else 0
+        out['stable'] = self.stable
+        out['phase'] = self.phase
+        if self.stable >= STABLE_FRAMES:
+            out.update(text='ALIGNED - STOP', color=(0, 255, 0))
+            return out
+        if sonar_ok:
+            # 허용범위 안에서 확정 카운트 중일 땐 정지 유지 — 원본은 여기서도
+            # TURN을 반환해서 --drive 시 정렬 막판에 서보가 좌우로 떨렸음
+            out.update(text='HOLD STILL', color=(0, 200, 255))
+            return out
+        out.update(text=self._direction(error, 'TURN LEFT', 'TURN RIGHT'),
+                   color=(0, 200, 255))
+        return out
+
+
+def servo_targets(text, turn_deg=10.0, drive_deg=10.0,
+                  invert_x=False, invert_y=False):
+    """지시 문구 → 서보 목표각 (x, y). 이동 지시 4개만 편향, 나머지는 중앙=정지.
+
+    어느 방향이 물리적으로 좌/전진인지는 서보-조이스틱 장착 방향에 달렸으므로
+    invert_x/invert_y로 현장에서 맞출 것.
+    """
+    x = y = SERVO_CENTER
+    sx = -1.0 if invert_x else 1.0
+    sy = -1.0 if invert_y else 1.0
+    if text == 'TURN LEFT':
+        x = SERVO_CENTER - sx * turn_deg
+    elif text == 'TURN RIGHT':
+        x = SERVO_CENTER + sx * turn_deg
+    elif text == 'MOVE FORWARD':
+        y = SERVO_CENTER + sy * drive_deg
+    elif text == 'MOVE BACKWARD':
+        y = SERVO_CENTER - sy * drive_deg
+    return x, y
 
 
 def compact_feature(feature):
