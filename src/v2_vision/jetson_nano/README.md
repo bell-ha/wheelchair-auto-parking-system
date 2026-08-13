@@ -12,6 +12,10 @@ jetson_nano/
 ├── ultrasound/
 │   ├── sample.ino                 # ESP32 펌웨어: 초음파 5개 + 서보 2축(팬/틸트), JSON 프로토콜
 │   └── test_sample.py             # 수동 조작용 curses 툴 (A/D/W/S로 서보, 텔레메트리 화면표시)
+├── guidance/
+│   ├── teach.py                   # 목표 상태 저장 툴 (카메라+초음파 보면서 지도 클릭, s로 저장)
+│   ├── guide.py                   # 사람-가이드 정렬: TURN LEFT 등 지시 표시 (모터 출력 없음)
+│   └── common.py                  # guidance 공용 (카메라/시리얼 파서/앵커 추출/좌표 추정)
 ├── unused/                        # 지금 안 쓰는 코드 (이유는 unused/README.md 참고)
 │   └── joystick/                  # 휠체어 주행 방향 제어 — 받아줄 펌웨어가 아직 없음
 ├── requirements.txt
@@ -132,6 +136,22 @@ python3 ultrasound/test_sample.py
 ```
 
 포트는 파일 상단 `SERIAL_PORT`(`/dev/ttyUSB0`) 수정.
+
+## 사람-가이드 정렬 (guidance/)
+
+teach & repeat 방식: `teach.py`로 목표 상태(사이드미러 위치·크기 + 측면 초음파 쌍 +
+지도에 클릭한 목표 좌표)를 JSON으로 저장해두고, `guide.py`가 현재 상태와 비교해
+"TURN LEFT / MOVE FORWARD / ALIGNED - STOP" 지시를 화면에 표시함 (모터 출력 없음).
+①VISION 단계(사이드미러 정렬) → ②SONAR 단계(측면 초음파 앞/뒤 차이로 평행 정렬) 순서.
+
+```bash
+python3 guidance/teach.py    # 지도 패널 클릭으로 목표 지정, s 저장, q 종료
+python3 guidance/guide.py    # r로 VISION 단계 재시작, q 종료
+```
+
+- 카메라·시리얼을 main.py/test_sample.py와 공유하므로 **동시 실행 불가**
+- 초음파 기준 거리(SONAR_BASELINE=0.315m)는 `sample.ino`의 `SIDE_SENSOR_SPACING_CM=31.5`와
+  맞춰둔 값 — 센서 간격을 바꾸면 양쪽 다 수정할 것
 
 
 
