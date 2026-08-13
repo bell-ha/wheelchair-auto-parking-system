@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
-"""ROS-free helpers for Jetson Nano human-guided alignment."""
+"""ROS-free helpers for Jetson Nano human-guided alignment.
+
+카메라/ESP32 하드웨어 접근은 상위의 hardware/ 공용 계층을 사용한다
+(main.py와 같은 모듈 — 설정/프로토콜 변경 시 hardware/ 한 곳만 고치면 됨).
+"""
 
 import json
 import math
-import os
-import time
+import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
 from ultralytics import YOLO
 
-
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))          # hardware/ 공용 계층 import용
+from hardware.camera import Webcam as _HwWebcam, ensure_display, DEFAULT_FPS
+from hardware.esp32 import ESP32Link
+
 DEFAULT_GOAL = HERE / 'real_front_goal.json'
 # 이 리포 구조 기준: jetson_nano/guidance/ 에서 한 단계 위의 camera/ 에 모델이 있음
 DEFAULT_MODEL = HERE.parent / 'camera' / 'best_v5_poster.pt'
@@ -24,137 +30,37 @@ SONAR_MAX = 3.0
 MAP_WIDTH = 360
 
 
-class Webcam:
+class Webcam(_HwWebcam):
+    """hardware.camera.Webcam + 창을 젯슨 HDMI(:0)로 보내는 환경 설정."""
 
-    def __init__(self, index=0, width=1280, height=720, fps=30, csi=False):
-        os.environ.setdefault('DISPLAY', ':0')
-        os.environ.setdefault('XAUTHORITY', '/run/user/1000/gdm/Xauthority')
-        if csi:
-            pipeline = (
-                'nvarguscamerasrc ! '
-                f'video/x-raw(memory:NVMM), width={width}, height={height}, '
-                f'framerate={fps}/1 ! nvvidconv ! '
-                'video/x-raw, format=BGRx ! videoconvert ! '
-                'video/x-raw, format=BGR ! '
-                'appsink drop=1 max-buffers=1 sync=false')
-        else:
-            pipeline = (
-                f'v4l2src device=/dev/video{index} ! '
-                f'image/jpeg,width={width},height={height},framerate={fps}/1 ! '
-                'jpegdec ! videoconvert ! video/x-raw,format=BGR ! '
-                'appsink drop=1 max-buffers=1 sync=false')
-        self.capture = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-        if not self.capture.isOpened():
-            raise RuntimeError(
-                'cannot open Jetson camera; check camera index/--csi and '
-                'GStreamer: YES in cv2.getBuildInformation()')
-
-    def read(self):
-        ok, frame = self.capture.read()
-        return frame if ok else None
-
-    def release(self):
-        self.capture.release()
+    def __init__(self, index=0, width=1280, height=720, fps=DEFAULT_FPS, csi=False):
+        ensure_display()
+        super().__init__(index=index, width=width, height=height, fps=fps, csi=csi)
 
 
 class SerialSonar:
-    """Read two ultrasonic distances from a non-blocking serial stream.
+    """hardware.esp32.ESP32Link의 guidance용 얇은 래퍼.
 
-    Accepted newline-delimited formats:
-      0.455,0.466
-      front=0.455,rear=0.466
-      {"front": 0.455, "rear": 0.466}
-    Distances must be metres.
+    poll()은 측면 앞/뒤 초음파 쌍을 m 단위 {'front','rear'}로 반환 (무효면 None).
+    front_index/rear_index 인자는 구버전 CLI 호환용으로 받기만 하고 사용 안 함
+    (현 펌웨어는 {side}_front/{side}_rear 이름으로 보냄).
     """
 
     def __init__(self, port='/dev/ttyUSB0', baud=115200, side='right',
                  front_index=0, rear_index=2, stale_seconds=0.7):
-        try:
-            import serial
-        except ImportError as exc:
-            raise RuntimeError('pyserial is required: pip3 install pyserial') from exc
-        self.serial = serial.Serial(port, baudrate=baud, timeout=0)
-        # 현재 펌웨어(ultrasound/sample.ino)는 {side}_front/{side}_rear 이름으로
-        # 보냄. 'us' 배열 스키마는 삭제된 구버전 펌웨어 호환용 레거시 경로.
+        self.link = ESP32Link(port, baud, stale_seconds=stale_seconds)
         self.side = side
-        self.front_index = front_index
-        self.rear_index = rear_index
-        self.stale_seconds = stale_seconds
-        self.values = None
-        self.last_update = 0.0
-        self.buffer = bytearray()
-
-    def _parse(self, line):
-        text = line.strip()
-        if not text:
-            return None
-        try:
-            if text.startswith('{'):
-                data = json.loads(text)
-                named_front = f'{self.side}_front'
-                named_rear = f'{self.side}_rear'
-                if named_front in data and named_rear in data:
-                    # ultrasound/sample.ino telemetry schema, centimetres.
-                    front = float(data[named_front]) / 100.0
-                    rear = float(data[named_rear]) / 100.0
-                elif 'us' in data:
-                    # Legacy schema (removed ultrasound.ino), centimetres.
-                    values = data['us']
-                    front = float(values[self.front_index]) / 100.0
-                    rear = float(values[self.rear_index]) / 100.0
-                else:
-                    # Compatibility with the simple JSON protocol. Values larger
-                    # than the controller's metre range are interpreted as cm.
-                    front, rear = float(data['front']), float(data['rear'])
-                    if data.get('unit') == 'cm' or max(front, rear) >= SONAR_MAX:
-                        front /= 100.0
-                        rear /= 100.0
-            elif '=' in text:
-                data = {}
-                for item in text.split(','):
-                    key, value = item.split('=', 1)
-                    data[key.strip()] = float(value)
-                front, rear = data['front'], data['rear']
-            else:
-                front, rear = (float(value) for value in text.split(',', 1))
-        except (ValueError, KeyError, IndexError, TypeError,
-                json.JSONDecodeError):
-            return None
-        if not all(math.isfinite(v) and 0.0 < v < SONAR_MAX
-                   for v in (front, rear)):
-            return None
-        return {'front': front, 'rear': rear}
 
     def poll(self):
-        waiting = self.serial.in_waiting
-        if waiting:
-            self.buffer.extend(self.serial.read(waiting))
-        while b'\n' in self.buffer:
-            raw, _, self.buffer = self.buffer.partition(b'\n')
-            parsed = self._parse(raw.decode('utf-8', errors='ignore'))
-            if parsed is not None:
-                self.values = parsed
-                self.last_update = time.monotonic()
-        if (self.values is None or
-                time.monotonic() - self.last_update > self.stale_seconds):
-            return None
-        return dict(self.values)
+        self.link.poll()
+        return self.link.side_pair_m(self.side)
 
     def send_servo(self, x_deg, y_deg):
-        """서보(조이스틱 액추에이터) 명령 송신.
-
-        초음파를 보내는 ESP32(ultrasound/sample.ino)가 서보 2축도 같이 받으므로
-        이 시리얼 연결을 그대로 재사용한다. 프로토콜은 main.py/test_sample.py와 동일:
-        {"cmd":"servo","x":0~180,"y":0~180} 한 줄.
-        """
-        msg = json.dumps(
-            {'cmd': 'servo', 'x': round(float(x_deg), 1),
-             'y': round(float(y_deg), 1)},
-            separators=(',', ':')) + '\n'
-        self.serial.write(msg.encode('utf-8'))
+        """서보(조이스틱 액추에이터) 명령 송신 — 같은 ESP32 연결 재사용."""
+        self.link.send_servo(x_deg, y_deg)
 
     def close(self):
-        self.serial.close()
+        self.link.close()
 
 
 def load_model(path=DEFAULT_MODEL):

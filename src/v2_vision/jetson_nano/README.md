@@ -6,8 +6,11 @@
 ```
 jetson_nano/
 ├── main.py                        # 통합 실행: 카메라(YOLO) + 초음파/서보(ESP32) 한 프로세스
+├── hardware/                      # 🔧 공용 하드웨어 계층 — main.py와 guidance/가 같이 씀
+│   ├── camera.py                  #   GStreamer 파이프라인 + Webcam (16:9/15fps 규칙 문서화)
+│   └── esp32.py                   #   시리얼 프로토콜 한 벌 (텔레메트리 수신 + 서보 송신)
 ├── camera/
-│   ├── live_camera.py             # 카메라 단독 실행/부하테스트용 (USB 웹캠, C920)
+│   ├── live_camera.py             # 카메라 단독 실행/부하테스트용 (독립 스냅샷, hardware/ 안 씀)
 │   └── best_v5_poster.pt          # 최신 모델
 ├── ultrasound/
 │   ├── sample.ino                 # ESP32 펌웨어: 초음파 5개 + 서보 2축(팬/틸트), JSON 프로토콜
@@ -22,11 +25,11 @@ jetson_nano/
 └── README.md
 ```
 
-`main.py`가 카메라(비전)와 초음파/서보(ESP32)를 한 프로세스에서 같이 돌리는
-통합 실행 파일 — 검출 결과와 초음파 텔레메트리를 매 프레임 터미널에 같이 출력함.
-`camera/live_camera.py`와 `ultrasound/test_sample.py`는 각 부품을 단독으로 빠르게
-점검하고 싶을 때 쓰는 개별 진입점으로 계속 남겨둠. 카메라/초음파 값을 엮어서 서보를
-자동으로 움직이는 판단 로직은 아직 없음 (지금은 순수 통합만).
+**구조 (3층):** 카메라/ESP32 접근 코드는 `hardware/` 공용 계층 한 벌뿐이고,
+그 위에 사람조종용(`main.py`)과 판단용(`guidance/`)이 올라감 — 카메라 설정이나
+시리얼 프로토콜이 바뀌면 `hardware/`(+펌웨어) 한 곳만 고치면 전체 반영됨.
+`camera/live_camera.py`와 `ultrasound/test_sample.py`는 hardware/ 이전의 독립
+스냅샷으로, 각 부품 단독 점검용으로만 남겨둠.
 
 ## 젯슨 접속 (SSH)
 

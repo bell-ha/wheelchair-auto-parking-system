@@ -121,7 +121,7 @@ def parse_args():
     # C920은 4:3 해상도(640x480 등)를 요청하면 좌우가 크롭되므로 16:9 기본값 사용
     parser.add_argument('--width', type=int, default=1280)
     parser.add_argument('--height', type=int, default=720)
-    parser.add_argument('--fps', type=int, default=30)
+    parser.add_argument('--fps', type=int, default=15)
     parser.add_argument('--csi', action='store_true')
     parser.add_argument('--serial-port', default='/dev/ttyUSB0')
     parser.add_argument('--baud', type=int, default=115200)

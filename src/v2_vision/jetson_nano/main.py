@@ -4,19 +4,15 @@
   거기에 < Vision > 섹션(검출 개수 / YOLO FPS)이 추가됨
 - HDMI 모니터: 검출 박스가 그려진 카메라 창 (--no-show로 끄면 터미널 화면만)
 
-스레드 구조 (YOLO가 4Hz라서 키 반응/화면까지 4Hz로 묶이는 문제를 분리로 해결):
-- UI 스레드(~33Hz): 키 입력 → 서보 명령 송신, 시리얼 텔레메트리 수신, 화면 그리기
-  → test_sample.py 단독 실행 때와 같은 반응속도. 시리얼/ curses는 이 스레드만 만짐.
+스레드 구조 (YOLO가 느려도 키 반응/화면이 안 묶이게 분리):
+- UI 스레드(~33Hz): 키 입력 → 서보 명령 송신, 시리얼 텔레메트리 수신, 화면 그리기(10Hz)
 - 메인 스레드: 카메라 프레임 읽기 + YOLO 추론 + (옵션) cv2 카메라 창
-  → 검출 개수/FPS만 shared로 UI 스레드에 넘김.
 
-camera/live_camera.py의 카메라 파이프라인 + ultrasound/sample.ino의 시리얼 프로토콜을
-그대로 가져와서 한 파일에 인라인으로 합쳤음 (로직이 크지 않아 이 편이 더 명확함).
-카메라/초음파 값을 엮어서 서보를 자동으로 움직이는 판단 로직은 아직 없음.
+카메라/ESP32 하드웨어 코드는 hardware/ 공용 계층을 사용 (guidance/와 같은 모듈).
+카메라·초음파 값을 엮어서 서보를 자동으로 움직이는 판단 로직은 아직 없음.
 """
 import argparse
 import curses
-import json
 import os
 import sys
 import threading
@@ -37,12 +33,13 @@ with warnings.catch_warnings():
 
 from ultralytics import YOLO
 
+from hardware.camera import Webcam, ensure_display, DEFAULT_FPS
+from hardware.esp32 import ESP32Link, DEFAULT_PORT, DEFAULT_BAUD
+
 
 # ======================================================
 # Config (test_sample.py와 동일)
 # ======================================================
-
-SERIAL_BAUD = 115200
 
 SERVO_STEP_DEG = 0.5
 
@@ -63,70 +60,8 @@ DRAW_INTERVAL = 0.1
 COMMAND_INTERVAL = 0.05
 
 
-# ======================================================
-# 카메라 (camera/live_camera.py에서 그대로 가져옴)
-# ======================================================
-
-def usb_pipeline(index=0, width=1280, height=720, fps=30):
-    return (
-        f"v4l2src device=/dev/video{index} ! "
-        f"image/jpeg,width={width},height={height},framerate={fps}/1 ! "
-        f"jpegdec ! videoconvert ! video/x-raw,format=BGR ! "
-        f"appsink drop=1 max-buffers=1 sync=false"
-    )
-
-
-def csi_pipeline(width=1280, height=720, fps=30):
-    return (
-        f"nvarguscamerasrc ! video/x-raw(memory:NVMM), width={width}, height={height}, "
-        f"framerate={fps}/1 ! nvvidconv ! video/x-raw, format=BGRx ! "
-        f"videoconvert ! video/x-raw, format=BGR ! "
-        f"appsink drop=1 max-buffers=1 sync=false"
-    )
-
-
-# ======================================================
-# ESP32 (ultrasound/sample.ino, test_sample.py와 같은 프로토콜)
-# 송신 {"cmd":"servo","x":..,"y":..}\n / 수신 {"type":"telemetry", ...}\n
-# ======================================================
-
 def clamp(value, lo, hi):
     return max(lo, min(hi, value))
-
-
-def send_servo_command(ser, x_deg, y_deg):
-    msg = json.dumps({"cmd": "servo", "x": round(x_deg, 1), "y": round(y_deg, 1)},
-                      separators=(",", ":")) + "\n"
-    ser.write(msg.encode("utf-8"))
-
-
-def read_telemetry_nonblocking(ser, tel):
-    """ser.in_waiting에 쌓인 줄을 전부 읽어서 tel dict를 최신 상태로 갱신."""
-    while ser.in_waiting > 0:
-        raw_bytes = ser.readline()
-        if not raw_bytes:
-            break
-
-        raw = raw_bytes.decode("utf-8", errors="ignore").strip()
-        if not raw:
-            continue
-
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            tel["_last_raw"] = f"JSON parse error: {raw}"
-            continue
-
-        if not isinstance(data, dict):
-            tel["_last_raw"] = f"ignored non-object JSON: {raw}"
-            continue
-        if data.get("type") != "telemetry":
-            tel["_last_raw"] = raw
-            continue
-
-        tel.update(data)
-        tel["_last_raw"] = raw
-        tel["_last_rx"] = time.time()
 
 
 # ======================================================
@@ -179,7 +114,7 @@ def safe_addstr(stdscr, y, x, text) -> None:
         pass
 
 
-def draw_screen(stdscr, tel, target_x, target_y, shared, args):
+def draw_screen(stdscr, tel, rx_age, target_x, target_y, shared, args):
     stdscr.erase()
 
     port = "미사용" if args.no_servo else args.serial_port
@@ -187,7 +122,7 @@ def draw_screen(stdscr, tel, target_x, target_y, shared, args):
     safe_addstr(stdscr, 0, 0, "Jetson Nano 통합 실행 (Camera + Ultrasonic + Servo)")
     safe_addstr(stdscr, 1, 0, "Keys: A/D = Servo X, W/S = Servo Y, Q = quit")
     safe_addstr(stdscr, 2, 0,
-                f"Port: {port} | Baud: {SERIAL_BAUD} | Step: {SERVO_STEP_DEG:.1f} deg")
+                f"Port: {port} | Baud: {args.serial_baud} | Step: {SERVO_STEP_DEG:.1f} deg")
 
     safe_addstr(stdscr, 4, 0, "< Vision >")
     safe_addstr(stdscr, 5, 0,
@@ -218,9 +153,7 @@ def draw_screen(stdscr, tel, target_x, target_y, shared, args):
     safe_addstr(stdscr, 28, 0, f"R_DIST : {fmt(tel.get('right_dist'), ' cm')}")
     safe_addstr(stdscr, 29, 0, f"R_ANGLE: {fmt(tel.get('right_angle'), ' deg')}")
 
-    last_rx = tel.get("_last_rx")
-    age = time.time() - last_rx if last_rx else None
-    safe_addstr(stdscr, 31, 0, f"Last ESP32 RX: {fmt(age, ' s')} ago")
+    safe_addstr(stdscr, 31, 0, f"Last ESP32 RX: {fmt(rx_age, ' s')} ago")
 
     safe_addstr(stdscr, 33, 0, "< Last raw line >")
     safe_addstr(stdscr, 34, 0, str(tel.get("_last_raw", ""))[:110])
@@ -232,17 +165,16 @@ def draw_screen(stdscr, tel, target_x, target_y, shared, args):
 # UI 스레드: 키 입력 + 시리얼 + 화면 (~33Hz, test_sample.py와 동일한 반응속도)
 # ======================================================
 
-def ui_loop(stdscr, ser, shared, args):
+def ui_loop(stdscr, link, shared, args):
     # 이 스레드에서 예외가 새면 화면만 조용히 죽고 YOLO는 계속 도는 좀비가
     # 되므로, 무슨 예외든 전체 종료로 연결한다
     try:
-        _ui_loop(stdscr, ser, shared, args)
+        _ui_loop(stdscr, link, shared, args)
     except Exception as e:
         shared.request_stop(f"UI 스레드 오류로 종료: {type(e).__name__}: {e}")
 
 
-def _ui_loop(stdscr, ser, shared, args):
-    tel = {}
+def _ui_loop(stdscr, link, shared, args):
     target_x = INITIAL_SERVO_X_DEG
     target_y = INITIAL_SERVO_Y_DEG
     last_cmd_time = 0.0
@@ -272,27 +204,29 @@ def _ui_loop(stdscr, ser, shared, args):
                 target_y -= SERVO_STEP_DEG
                 changed = True
 
-            if changed and ser is not None:
+            if changed and link is not None:
                 target_x = clamp(target_x, SERVO_MIN_DEG, SERVO_MAX_DEG)
                 target_y = clamp(target_y, SERVO_MIN_DEG, SERVO_MAX_DEG)
                 try:
-                    send_servo_command(ser, target_x, target_y)
+                    link.send_servo(target_x, target_y)
                 except (serial.SerialException, OSError) as e:
                     shared.request_stop(f"ESP32 시리얼 연결 끊김(송신): {e}")
                     break
                 last_cmd_time = now
 
         # 2. 시리얼 수신
-        if ser is not None:
+        tel, rx_age = {}, None
+        if link is not None:
             try:
-                read_telemetry_nonblocking(ser, tel)
+                tel = link.poll()
+                rx_age = link.rx_age()
             except (serial.SerialException, OSError) as e:
                 shared.request_stop(f"ESP32 시리얼 연결 끊김(수신): {e}")
                 break
 
         # 3. 화면 그리기 (키 폴링보다 낮은 10Hz — 33Hz 전체 갱신은 CPU 낭비)
         if now - last_draw >= DRAW_INTERVAL:
-            draw_screen(stdscr, tel, target_x, target_y, shared, args)
+            draw_screen(stdscr, tel, rx_age, target_x, target_y, shared, args)
             last_draw = now
 
         time.sleep(LOOP_DT)
@@ -302,26 +236,21 @@ def _ui_loop(stdscr, ser, shared, args):
 # 메인 스레드: 카메라 + YOLO
 # ======================================================
 
-def run(stdscr, cap, model, ser, args):
+def run(stdscr, cam, model, link, shared, args):
     """종료 사유를 반환 (curses가 화면을 되돌린 뒤에 출력하려고)."""
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.timeout(1)
 
-    shared = Shared()
-
-    ui = threading.Thread(target=ui_loop, args=(stdscr, ser, shared, args), daemon=True)
+    ui = threading.Thread(target=ui_loop, args=(stdscr, link, shared, args), daemon=True)
     ui.start()
 
     loop_times = []
     t_prev = time.time()
 
     while not shared.stop.is_set():
-        try:
-            ok, frame = cap.read()
-        except cv2.error:
-            ok = False
-        if not ok:
+        frame = cam.read()
+        if frame is None:
             shared.request_stop("프레임 읽기 실패 — 카메라 연결 확인 (dmesg에 USB 관련 로그 있는지)")
             break
 
@@ -357,64 +286,55 @@ def main():
     ap.add_argument("--imgsz", type=int, default=640)
     ap.add_argument("--cam-width", type=int, default=1280)
     ap.add_argument("--cam-height", type=int, default=720)
-    # 30fps로 받으면 GStreamer 디코딩 스레드가 코어 하나를 통째로 먹으면서(실측 91%)
-    # YOLO에 갈 CPU를 뺏음 — 추론이 어차피 초당 십수 장이라 15fps로 충분 (C920 지원값)
-    ap.add_argument("--cam-fps", type=int, default=15,
+    ap.add_argument("--cam-fps", type=int, default=DEFAULT_FPS,
                      help="카메라 프레임레이트 (C920 지원: 5/10/15/20/25/30)")
     ap.add_argument("--no-show", action="store_true", help="카메라 창 없이 터미널 화면만")
-    ap.add_argument("--serial-port", default="/dev/ttyUSB0")
-    ap.add_argument("--serial-baud", type=int, default=SERIAL_BAUD)
+    ap.add_argument("--serial-port", default=DEFAULT_PORT)
+    ap.add_argument("--serial-baud", type=int, default=DEFAULT_BAUD)
     ap.add_argument("--no-servo", action="store_true", help="ESP32 없이 카메라만 테스트")
     args = ap.parse_args()
 
     if not args.no_show:
-        os.environ.setdefault("DISPLAY", ":0")
-        os.environ.setdefault("XAUTHORITY", "/run/user/1000/gdm/Xauthority")
+        ensure_display()
 
     model = YOLO(args.model)
 
-    if args.csi:
-        cap = cv2.VideoCapture(
-            csi_pipeline(args.cam_width, args.cam_height, args.cam_fps), cv2.CAP_GSTREAMER)
-    else:
-        cap = cv2.VideoCapture(
-            usb_pipeline(args.cam, args.cam_width, args.cam_height, args.cam_fps),
-            cv2.CAP_GSTREAMER)
-    if not cap.isOpened():
-        sys.exit("카메라를 열 수 없음 (--cam 인덱스 또는 --csi 여부 확인)")
+    try:
+        cam = Webcam(index=args.cam, width=args.cam_width, height=args.cam_height,
+                     fps=args.cam_fps, csi=args.csi)
+    except RuntimeError as e:
+        sys.exit(str(e))
 
-    ser = None
+    link = None
     if not args.no_servo:
         try:
-            ser = serial.Serial(args.serial_port, args.serial_baud, timeout=0)
-            time.sleep(2.0)  # 포트 열 때 ESP32가 리셋되므로 부팅 대기
-            ser.reset_input_buffer()
-            ser.reset_output_buffer()
-            send_servo_command(ser, INITIAL_SERVO_X_DEG, INITIAL_SERVO_Y_DEG)
+            link = ESP32Link(args.serial_port, args.serial_baud)
+            link.send_servo(INITIAL_SERVO_X_DEG, INITIAL_SERVO_Y_DEG)  # 초기 중앙
             print(f"ESP32 연결됨 ({args.serial_port})")
         except serial.SerialException as e:
             print(f"ESP32 연결 실패, 초음파/서보 없이 진행: {e}")
-            ser = None
+            link = None
 
     # 젯슨 첫 추론은 CUDA 커널 준비로 수십 초 걸림. curses 화면으로 들어가기 전에
     # 미리 소진해야 사용자가 빈 화면만 보며 기다리는 상황을 피할 수 있음.
     print("모델 워밍업 중... (젯슨 첫 추론 특성상 최대 1분 정도 걸릴 수 있음)")
     t0 = time.time()
-    ok, frame = cap.read()
-    if ok:
+    frame = cam.read()
+    if frame is not None:
         model.predict(frame, conf=args.conf, imgsz=args.imgsz, iou=0.5, verbose=False)
     print(f"워밍업 완료 ({time.time() - t0:.1f}s) — 화면 전환")
 
+    shared = Shared()
     reason = None
     try:
-        reason = curses.wrapper(run, cap, model, ser, args)
+        reason = curses.wrapper(run, cam, model, link, shared, args)
     except KeyboardInterrupt:
         reason = "Ctrl-C 종료"
     finally:
-        cap.release()
+        cam.release()
         cv2.destroyAllWindows()
-        if ser is not None:
-            ser.close()
+        if link is not None:
+            link.close()
 
     # curses가 화면을 원래대로 돌려놓은 뒤에 출력해야 사용자가 볼 수 있음
     if reason:

@@ -1,0 +1,25 @@
+{
+  "schema": "jetson_human_guidance_v1",
+  "anchor": "side_mirror",
+  "vision": {
+    "side_mirror": {
+      "u": 805.7799072265625,
+      "v": 189.69044494628906,
+      "size": 140.56104904154978
+    }
+  },
+  "sonar": {
+    "side": "right",
+    "front": 1.38452,
+    "rear": 1.067931
+  },
+  "camera": {
+    "width": 1280,
+    "height": 720
+  },
+  "taught_relative_pose": {
+    "x": -2.4,
+    "y": 0.27692307692307694,
+    "yaw": -1.5708
+  }
+}
