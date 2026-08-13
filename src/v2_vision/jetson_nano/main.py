@@ -169,6 +169,9 @@ def safe_addstr(stdscr, y, x, text) -> None:
     max_y, max_x = stdscr.getmaxyx()
     if y < 0 or y >= max_y or x < 0 or x >= max_x:
         return
+    # 시리얼 노이즈로 널 문자(\x00) 등 제어문자가 섞여 오면 addstr이
+    # ValueError를 던지므로 표시 전에 걸러냄
+    text = "".join(ch for ch in text if ch.isprintable() or ch == " ")
     try:
         stdscr.addstr(y, x, text[: max_x - x])
     except curses.error:
@@ -230,6 +233,15 @@ def draw_screen(stdscr, tel, target_x, target_y, shared, args):
 # ======================================================
 
 def ui_loop(stdscr, ser, shared, args):
+    # 이 스레드에서 예외가 새면 화면만 조용히 죽고 YOLO는 계속 도는 좀비가
+    # 되므로, 무슨 예외든 전체 종료로 연결한다
+    try:
+        _ui_loop(stdscr, ser, shared, args)
+    except Exception as e:
+        shared.request_stop(f"UI 스레드 오류로 종료: {type(e).__name__}: {e}")
+
+
+def _ui_loop(stdscr, ser, shared, args):
     tel = {}
     target_x = INITIAL_SERVO_X_DEG
     target_y = INITIAL_SERVO_Y_DEG
