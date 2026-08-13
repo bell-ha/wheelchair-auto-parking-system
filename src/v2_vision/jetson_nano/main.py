@@ -1,8 +1,14 @@
 """통합 실행: ultrasound/test_sample.py 화면/조작 그대로 + 카메라(YOLO 검출)를 얹음.
 
 - 터미널: test_sample.py와 동일한 curses 화면 (A/D/W/S로 서보 조작, 초음파 텔레메트리 표시)
-  거기에 < Vision > 섹션(검출 개수 / FPS)이 추가됨
+  거기에 < Vision > 섹션(검출 개수 / YOLO FPS)이 추가됨
 - HDMI 모니터: 검출 박스가 그려진 카메라 창 (--no-show로 끄면 터미널 화면만)
+
+스레드 구조 (YOLO가 4Hz라서 키 반응/화면까지 4Hz로 묶이는 문제를 분리로 해결):
+- UI 스레드(~33Hz): 키 입력 → 서보 명령 송신, 시리얼 텔레메트리 수신, 화면 그리기
+  → test_sample.py 단독 실행 때와 같은 반응속도. 시리얼/ curses는 이 스레드만 만짐.
+- 메인 스레드: 카메라 프레임 읽기 + YOLO 추론 + (옵션) cv2 카메라 창
+  → 검출 개수/FPS만 shared로 UI 스레드에 넘김.
 
 camera/live_camera.py의 카메라 파이프라인 + ultrasound/sample.ino의 시리얼 프로토콜을
 그대로 가져와서 한 파일에 인라인으로 합쳤음 (로직이 크지 않아 이 편이 더 명확함).
@@ -13,10 +19,18 @@ import curses
 import json
 import os
 import sys
+import threading
 import time
 
 import cv2
+import numpy as np
 import serial
+
+# TensorRT 8.0 파이썬 바인딩이 구식 np.bool을 참조 (numpy 1.24+에서 제거됨).
+# .engine 모델을 로드하려면 ultralytics가 tensorrt를 import하기 전에 별칭 복원 필요.
+if not hasattr(np, "bool"):
+    np.bool = bool
+
 from ultralytics import YOLO
 
 
@@ -33,6 +47,9 @@ SERVO_MAX_DEG = 180.0
 
 INITIAL_SERVO_X_DEG = 90.0
 INITIAL_SERVO_Y_DEG = 90.0
+
+# UI 스레드 주기 (키 입력 체크 + 화면 갱신)
+LOOP_DT = 0.03  # 약 33 Hz
 
 # 같은 키가 눌려있을 때 너무 빠르게 변하지 않도록 제한
 COMMAND_INTERVAL = 0.05
@@ -105,6 +122,29 @@ def read_telemetry_nonblocking(ser, tel):
 
 
 # ======================================================
+# 스레드 간 공유 상태
+# ======================================================
+
+class Shared:
+    """메인(YOLO) ↔ UI 스레드가 주고받는 최소한의 상태.
+
+    n_detections/fps는 단순 스칼라 대입이라 GIL 하에서 별도 락 없이 안전.
+    종료는 stop 이벤트 하나로 양방향 전파 (먼저 사유를 적은 쪽이 이김).
+    """
+
+    def __init__(self):
+        self.stop = threading.Event()
+        self.stop_reason = None
+        self.n_detections = 0
+        self.fps = 0.0
+
+    def request_stop(self, reason):
+        if not self.stop.is_set():
+            self.stop_reason = reason
+            self.stop.set()
+
+
+# ======================================================
 # 터미널 화면 (test_sample.py의 draw_screen과 동일 + Vision 섹션)
 # ======================================================
 
@@ -128,7 +168,7 @@ def safe_addstr(stdscr, y, x, text) -> None:
         pass
 
 
-def draw_screen(stdscr, tel, target_x, target_y, n_detections, fps, args):
+def draw_screen(stdscr, tel, target_x, target_y, shared, args):
     stdscr.erase()
 
     port = "미사용" if args.no_servo else args.serial_port
@@ -141,7 +181,8 @@ def draw_screen(stdscr, tel, target_x, target_y, n_detections, fps, args):
     safe_addstr(stdscr, 4, 0, "< Vision >")
     safe_addstr(stdscr, 5, 0,
                 f"Camera: /dev/video{args.cam} ({args.cam_width}x{args.cam_height})")
-    safe_addstr(stdscr, 6, 0, f"검출: {n_detections}개 | {fps:.1f} FPS")
+    safe_addstr(stdscr, 6, 0,
+                f"검출: {shared.n_detections}개 | YOLO {shared.fps:.1f} FPS")
 
     safe_addstr(stdscr, 8, 0, "< Command Target >")
     safe_addstr(stdscr, 9, 0, f"Servo X target: {target_x:8.1f} deg")
@@ -177,43 +218,26 @@ def draw_screen(stdscr, tel, target_x, target_y, n_detections, fps, args):
 
 
 # ======================================================
-# 메인 루프
+# UI 스레드: 키 입력 + 시리얼 + 화면 (~33Hz, test_sample.py와 동일한 반응속도)
 # ======================================================
 
-def run(stdscr, cap, model, ser, args):
-    """종료 사유를 반환 (curses가 화면을 되돌린 뒤에 출력하려고)."""
-    curses.curs_set(0)
-    stdscr.nodelay(True)
-    stdscr.timeout(1)
-
+def ui_loop(stdscr, ser, shared, args):
     tel = {}
     target_x = INITIAL_SERVO_X_DEG
     target_y = INITIAL_SERVO_Y_DEG
     last_cmd_time = 0.0
 
-    loop_times = []
-    t_prev = time.time()
-
-    while True:
-        # 1. 카메라 + 추론
-        try:
-            ok, frame = cap.read()
-        except cv2.error:
-            ok = False
-        if not ok:
-            return "프레임 읽기 실패 — 카메라 연결 확인 (dmesg에 USB 관련 로그 있는지)"
-
-        res = model.predict(frame, conf=args.conf, imgsz=args.imgsz,
-                             iou=0.5, verbose=False)[0]
-
-        # 2. 키보드 입력 → 서보 목표각 (test_sample.py와 동일)
+    while not shared.stop.is_set():
         now = time.time()
+
+        # 1. 키보드 입력 → 서보 목표각 (test_sample.py와 동일)
         key = stdscr.getch()
         changed = False
 
         if key != -1 and now - last_cmd_time >= COMMAND_INTERVAL:
             if key in (ord("q"), ord("Q")):
-                return "사용자 종료 (q)"
+                shared.request_stop("사용자 종료 (q)")
+                break
             elif key in (ord("a"), ord("A")):
                 target_x -= SERVO_STEP_DEG
                 changed = True
@@ -233,28 +257,69 @@ def run(stdscr, cap, model, ser, args):
                 try:
                     send_servo_command(ser, target_x, target_y)
                 except (serial.SerialException, OSError) as e:
-                    return f"ESP32 시리얼 연결 끊김(송신): {e}"
+                    shared.request_stop(f"ESP32 시리얼 연결 끊김(송신): {e}")
+                    break
                 last_cmd_time = now
 
-        # 3. 시리얼 수신
+        # 2. 시리얼 수신
         if ser is not None:
             try:
                 read_telemetry_nonblocking(ser, tel)
             except (serial.SerialException, OSError) as e:
-                return f"ESP32 시리얼 연결 끊김(수신): {e}"
+                shared.request_stop(f"ESP32 시리얼 연결 끊김(수신): {e}")
+                break
 
-        # 4. 화면 그리기
+        # 3. 화면 그리기
+        draw_screen(stdscr, tel, target_x, target_y, shared, args)
+
+        time.sleep(LOOP_DT)
+
+
+# ======================================================
+# 메인 스레드: 카메라 + YOLO
+# ======================================================
+
+def run(stdscr, cap, model, ser, args):
+    """종료 사유를 반환 (curses가 화면을 되돌린 뒤에 출력하려고)."""
+    curses.curs_set(0)
+    stdscr.nodelay(True)
+    stdscr.timeout(1)
+
+    shared = Shared()
+
+    ui = threading.Thread(target=ui_loop, args=(stdscr, ser, shared, args), daemon=True)
+    ui.start()
+
+    loop_times = []
+    t_prev = time.time()
+
+    while not shared.stop.is_set():
+        try:
+            ok, frame = cap.read()
+        except cv2.error:
+            ok = False
+        if not ok:
+            shared.request_stop("프레임 읽기 실패 — 카메라 연결 확인 (dmesg에 USB 관련 로그 있는지)")
+            break
+
+        res = model.predict(frame, conf=args.conf, imgsz=args.imgsz,
+                             iou=0.5, verbose=False)[0]
+
+        now = time.time()
         loop_times.append(now - t_prev)
         t_prev = now
         recent = loop_times[-30:]          # 최근 30프레임 이동 평균
-        fps = len(recent) / sum(recent) if sum(recent) > 0 else 0.0
-
-        draw_screen(stdscr, tel, target_x, target_y, len(res.boxes), fps, args)
+        shared.fps = len(recent) / sum(recent) if sum(recent) > 0 else 0.0
+        shared.n_detections = len(res.boxes)
 
         if not args.no_show:
             cv2.imshow("main", res.plot())
             if cv2.waitKey(1) & 0xFF == ord("q"):
-                return "사용자 종료 (q, 카메라 창)"
+                shared.request_stop("사용자 종료 (q, 카메라 창)")
+                break
+
+    ui.join(timeout=2)
+    return shared.stop_reason
 
 
 def main():
