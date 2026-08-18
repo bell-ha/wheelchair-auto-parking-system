@@ -1,10 +1,16 @@
 """통합 조종석: 카메라(YOLO) + 초음파 + 서보(조이스틱)를 한 프로세스·한 화면에서.
 
-- 수동 모드: A/D/W/S로 서보 직접 조작 (기본)
+- 수동 모드(기본): W/A/S/D = 전진/좌회전/후진/우회전 프리셋, SPACE = 정지(중립).
+  키를 누르면 목표 프리셋이 래치되고, 서보는 램프(ServoRamp)로 천천히 접근.
 - 자동 모드: G 키 — guidance의 판단기(AlignmentPlanner)가 teach로 저장한 goal을
   향해 서보를 스스로 조작. **아무 이동키나 누르면 즉시 수동 복귀 + 정지** (비상 개입)
-- 터미널(curses): 검출/FPS, 자동모드 지시·근거, 초음파 5개, 서보 에코를 실시간 표시
+- E 키: MPU6050 yaw 측정 토글 (첫 토글: 정지 상태 캘리브레이션 → 0점 → 측정)
+- 터미널(curses): 검출/FPS, 자동모드 지시·근거, IMU, 초음파 5개, 서보 에코 표시
 - HDMI: 검출 박스 카메라 창 (--no-show로 끄기)
+
+수동/자동 모두 hardware.esp32의 실측 조이스틱 프리셋을 쓴다 (중립=87/85,
+90/90 아님). 지시 문구 규약은 guidance.common.servo_targets와 동일 —
+이동 지시 4종만 편향, 나머지는 전부 중립=정지.
 
 계층 구조: hardware/(카메라·ESP32 접근) 위에 이 파일(사람조종+조종석)과
 guidance/(판단·goal 관리)가 올라가고, 자동모드는 guidance 판단기를 import해서 씀.
@@ -35,30 +41,31 @@ with warnings.catch_warnings():
 from ultralytics import YOLO
 
 from hardware.camera import Webcam, ensure_display, DEFAULT_FPS
-from hardware.esp32 import ESP32Link, DEFAULT_PORT, DEFAULT_BAUD
+from hardware.esp32 import (ESP32Link, ServoRamp, DEFAULT_PORT, DEFAULT_BAUD,
+                            NEUTRAL_X_DEG, NEUTRAL_Y_DEG, servo_preset)
 from guidance.common import (MAP_WIDTH, STABLE_FRAMES, AlignmentPlanner,
                              FeatureSmoother, anchor_from_result,
                              draw_top_view, load_goal, relative_estimate,
-                             scaled_goal_feature, servo_targets)
+                             scaled_goal_feature)
 
 
 # ======================================================
 # Config
 # ======================================================
 
-SERVO_STEP_DEG = 0.5
-SERVO_MIN_DEG = 0.0
-SERVO_MAX_DEG = 180.0
-SERVO_CENTER = 90.0
-
 LOOP_DT = 0.03            # UI 스레드 주기 (키 입력 체크, 약 33Hz)
 DRAW_INTERVAL = 0.1       # 화면 갱신 10Hz (33Hz 전체 갱신은 CPU 낭비 — 실측)
-COMMAND_INTERVAL = 0.05   # 수동 키 연타 시 전송 최소 간격
-AUTO_KEEPALIVE = 0.5      # 자동모드: 같은 목표각이라도 이 주기마다 재전송
+SERVO_KEEPALIVE = 0.5     # 목표 도달 후에도 이 주기마다 마지막 명령 재전송
+YAW_TOGGLE_INTERVAL = 0.3 # E 키 연타 방지
 
-
-def clamp(value, lo, hi):
-    return max(lo, min(hi, value))
+# 수동 모드 키 → 지시 문구 (guidance 판단기와 같은 규약 → 같은 프리셋 사용)
+MANUAL_KEYS = {
+    ord("w"): "MOVE FORWARD", ord("W"): "MOVE FORWARD",
+    ord("a"): "TURN LEFT", ord("A"): "TURN LEFT",
+    ord("s"): "MOVE BACKWARD", ord("S"): "MOVE BACKWARD",
+    ord("d"): "TURN RIGHT", ord("D"): "TURN RIGHT",
+    ord(" "): "STOP",
+}
 
 
 # ======================================================
@@ -117,14 +124,14 @@ def safe_addstr(stdscr, y, x, text) -> None:
         pass
 
 
-def draw_screen(stdscr, tel, rx_age, target_x, target_y, shared, args):
+def draw_screen(stdscr, tel, rx_age, manual_text, ramp, shared, args):
     stdscr.erase()
 
     port = "미사용" if args.no_servo else args.serial_port
 
     safe_addstr(stdscr, 0, 0, "Jetson Nano 통합 조종석 (Camera + Ultrasonic + Servo)")
     safe_addstr(stdscr, 1, 0,
-                "Keys: A/D=서보X  W/S=서보Y  G=자동모드 토글  Q=종료")
+                "Keys: W/A/S/D=전진/좌/후진/우  SPACE=정지  E=Yaw  G=자동모드  Q=종료")
     safe_addstr(stdscr, 2, 0,
                 f"Camera: /dev/video{args.cam} ({args.cam_width}x{args.cam_height})"
                 f" | ESP32: {port}")
@@ -151,29 +158,50 @@ def draw_screen(stdscr, tel, rx_age, target_x, target_y, shared, args):
         detail = (f"du={fmt(plan['du'])} scale={fmt(plan['scale'])} "
                   f"sonarErr={fmt(plan['sonar_err'], 'm')}")
         if shared.auto_target is not None:
-            detail += (f" | 전송 x={shared.auto_target[0]:.0f}"
+            detail += (f" | 프리셋 x={shared.auto_target[0]:.0f}"
                        f" y={shared.auto_target[1]:.0f}")
         safe_addstr(stdscr, 10, 0, detail)
     else:
-        safe_addstr(stdscr, 9, 0, "지시: (자동모드 아님)")
+        safe_addstr(stdscr, 9, 0, f"지시: (수동) {manual_text}")
 
-    safe_addstr(stdscr, 12, 0, "< Servo >")
-    safe_addstr(stdscr, 13, 0,
-                f"수동 목표: X {target_x:6.1f}  Y {target_y:6.1f}   |   "
+    safe_addstr(stdscr, 12, 0, "< Servo (조이스틱 프리셋 + 램프) >")
+    if ramp is not None:
+        servo_line = (f"목표: X {ramp.target_x:6.1f}  Y {ramp.target_y:6.1f}"
+                      f"   |   램프 전송: X {ramp.command_x:6.1f}"
+                      f"  Y {ramp.command_y:6.1f}")
+    else:
+        servo_line = "목표: (서보 미사용)"
+    safe_addstr(stdscr, 13, 0, servo_line)
+    safe_addstr(stdscr, 14, 0,
                 f"에코(펌웨어 적용값): X {fmt(tel.get('servo_x'))}"
                 f"  Y {fmt(tel.get('servo_y'))}")
 
-    safe_addstr(stdscr, 15, 0, "< Ultrasonic (cm) >")
-    safe_addstr(stdscr, 16, 0, f"Front: {fmt(tel.get('front'))}")
-    safe_addstr(stdscr, 17, 0,
+    safe_addstr(stdscr, 16, 0, "< IMU (MPU6050) >")
+    imu = tel.get("imu_ready")
+    imu_status = "---" if imu is None else ("READY" if imu else "NOT READY")
+    if tel.get("yaw_calibrating"):
+        yaw_state = "CALIBRATING — 휠체어 정지 유지"
+    elif tel.get("yaw_active"):
+        yaw_state = "MEASURING"
+    else:
+        yaw_state = "STOPPED"
+    safe_addstr(stdscr, 17, 0, f"상태: {imu_status} | Yaw: {yaw_state}")
+    safe_addstr(stdscr, 18, 0,
+                f"yaw {fmt(tel.get('yaw'), ' deg')}"
+                f"  gyroZ {fmt(tel.get('gyro_z'), ' dps')}"
+                f"  bias {fmt(tel.get('gyro_z_bias'), ' dps')}")
+
+    safe_addstr(stdscr, 20, 0, "< Ultrasonic (cm) >")
+    safe_addstr(stdscr, 21, 0, f"Front: {fmt(tel.get('front'))}")
+    safe_addstr(stdscr, 22, 0,
                 f"L  f {fmt(tel.get('left_front'))}  r {fmt(tel.get('left_rear'))}"
                 f"  d {fmt(tel.get('left_dist'))}  a {fmt(tel.get('left_angle'))}")
-    safe_addstr(stdscr, 18, 0,
+    safe_addstr(stdscr, 23, 0,
                 f"R  f {fmt(tel.get('right_front'))}  r {fmt(tel.get('right_rear'))}"
                 f"  d {fmt(tel.get('right_dist'))}  a {fmt(tel.get('right_angle'))}")
 
-    safe_addstr(stdscr, 20, 0, f"Last ESP32 RX: {fmt(rx_age, ' s')} ago")
-    safe_addstr(stdscr, 21, 0, "raw: " + str(tel.get("_last_raw", ""))[:100])
+    safe_addstr(stdscr, 25, 0, f"Last ESP32 RX: {fmt(rx_age, ' s')} ago")
+    safe_addstr(stdscr, 26, 0, "raw: " + str(tel.get("_last_raw", ""))[:100])
 
     stdscr.refresh()
 
@@ -182,48 +210,37 @@ def draw_screen(stdscr, tel, rx_age, target_x, target_y, shared, args):
 # UI 스레드: 키 입력 + 시리얼 + 화면 (~33Hz)
 # ======================================================
 
-def ui_loop(stdscr, link, shared, args):
+def ui_loop(stdscr, link, ramp, shared, args):
     # 이 스레드에서 예외가 새면 화면만 조용히 죽고 YOLO는 계속 도는 좀비가
     # 되므로, 무슨 예외든 전체 종료로 연결한다
     try:
-        _ui_loop(stdscr, link, shared, args)
+        _ui_loop(stdscr, link, ramp, shared, args)
     except Exception as e:
         shared.request_stop(f"UI 스레드 오류로 종료: {type(e).__name__}: {e}")
 
 
-def _ui_loop(stdscr, link, shared, args):
-    target_x = SERVO_CENTER
-    target_y = SERVO_CENTER
-    last_cmd_time = 0.0
+def _ui_loop(stdscr, link, ramp, shared, args):
+    manual_text = "STOP"        # 수동 목표 지시 문구 (키로 래치)
     last_draw = 0.0
-    last_auto_sent = None
-    last_auto_time = 0.0
+    last_yaw_toggle = 0.0
 
-    def send(x, y):
-        if link is None:
-            return True
-        try:
-            link.send_servo(x, y)
-            return True
-        except (serial.SerialException, OSError) as e:
-            shared.request_stop(f"ESP32 시리얼 연결 끊김(송신): {e}")
-            return False
+    def set_ramp_target(text):
+        if ramp is not None:
+            ramp.set_target(*servo_preset(text, args.invert_x, args.invert_y))
 
     def exit_auto():
-        """자동 → 수동 복귀. 안전을 위해 무조건 중앙(정지)으로."""
-        nonlocal target_x, target_y, last_auto_sent
+        """자동 → 수동 복귀. 안전을 위해 무조건 중립(정지)으로 램프."""
+        nonlocal manual_text
         shared.mode = "MANUAL"
         shared.auto_target = None
-        target_x = target_y = SERVO_CENTER
-        last_auto_sent = None
-        send(SERVO_CENTER, SERVO_CENTER)
+        manual_text = "STOP"
+        set_ramp_target("STOP")
 
     while not shared.stop.is_set():
         now = time.time()
 
         # 1. 키보드 입력
         key = stdscr.getch()
-        changed = False
 
         if key != -1:
             if key in (ord("q"), ord("Q")):
@@ -233,42 +250,42 @@ def _ui_loop(stdscr, link, shared, args):
                 if shared.mode == "AUTO":
                     exit_auto()
                 elif shared.auto_available:
-                    shared.mode = "AUTO"    # 판단기 리셋은 메인 스레드가 함
-            elif key in (ord("a"), ord("A"), ord("d"), ord("D"),
-                         ord("w"), ord("W"), ord("s"), ord("S")):
+                    # 자동 진입은 정지 상태에서 시작 (판단기 리셋은 메인 스레드가 함)
+                    manual_text = "STOP"
+                    set_ramp_target("STOP")
+                    shared.mode = "AUTO"
+            elif key in (ord("e"), ord("E")):
+                if link is not None and \
+                        now - last_yaw_toggle >= YAW_TOGGLE_INTERVAL:
+                    try:
+                        link.send_yaw_toggle()
+                    except (serial.SerialException, OSError) as e:
+                        shared.request_stop(f"ESP32 시리얼 연결 끊김(송신): {e}")
+                        break
+                    last_yaw_toggle = now
+            elif key in MANUAL_KEYS:
                 if shared.mode == "AUTO":
                     # 자동 주행 중 사람 개입 = 비상정지 (키 자체는 적용 안 함)
                     exit_auto()
-                elif now - last_cmd_time >= COMMAND_INTERVAL:
-                    if key in (ord("a"), ord("A")):
-                        target_x -= SERVO_STEP_DEG
-                    elif key in (ord("d"), ord("D")):
-                        target_x += SERVO_STEP_DEG
-                    elif key in (ord("w"), ord("W")):
-                        target_y += SERVO_STEP_DEG
-                    else:
-                        target_y -= SERVO_STEP_DEG
-                    target_x = clamp(target_x, SERVO_MIN_DEG, SERVO_MAX_DEG)
-                    target_y = clamp(target_y, SERVO_MIN_DEG, SERVO_MAX_DEG)
-                    changed = True
+                else:
+                    manual_text = MANUAL_KEYS[key]
+                    set_ramp_target(manual_text)
 
-            if changed and link is not None:
-                if not send(target_x, target_y):
-                    break
-                last_cmd_time = now
-
-        # 2. 자동모드 서보 전송 (메인 스레드가 계산한 목표각)
-        if shared.mode == "AUTO" and link is not None:
+        # 2. 자동모드 목표 반영 (메인 스레드가 계산한 프리셋)
+        if shared.mode == "AUTO":
             tgt = shared.auto_target
-            if tgt is not None and (
-                    tgt != last_auto_sent or
-                    now - last_auto_time > AUTO_KEEPALIVE):
-                if not send(*tgt):
-                    break
-                last_auto_sent = tgt
-                last_auto_time = now
+            if tgt is not None and ramp is not None:
+                ramp.set_target(*tgt)
 
-        # 3. 시리얼 수신
+        # 3. 서보 램프 송신 — 목표가 어디서 왔든(수동/자동) 여기 한 곳에서만 전송
+        if ramp is not None:
+            try:
+                ramp.tick()
+            except (serial.SerialException, OSError) as e:
+                shared.request_stop(f"ESP32 시리얼 연결 끊김(송신): {e}")
+                break
+
+        # 4. 시리얼 수신
         tel, rx_age = {}, None
         if link is not None:
             try:
@@ -278,9 +295,9 @@ def _ui_loop(stdscr, link, shared, args):
                 shared.request_stop(f"ESP32 시리얼 연결 끊김(수신): {e}")
                 break
 
-        # 4. 화면 그리기 (10Hz)
+        # 5. 화면 그리기 (10Hz)
         if now - last_draw >= DRAW_INTERVAL:
-            draw_screen(stdscr, tel, rx_age, target_x, target_y, shared, args)
+            draw_screen(stdscr, tel, rx_age, manual_text, ramp, shared, args)
             last_draw = now
 
         time.sleep(LOOP_DT)
@@ -290,13 +307,14 @@ def _ui_loop(stdscr, link, shared, args):
 # 메인 스레드: 카메라 + YOLO + (자동모드) 판단
 # ======================================================
 
-def run(stdscr, cam, model, link, planner, shared, args):
+def run(stdscr, cam, model, link, ramp, planner, shared, args):
     """종료 사유를 반환 (curses가 화면을 되돌린 뒤에 출력하려고)."""
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.timeout(1)
 
-    ui = threading.Thread(target=ui_loop, args=(stdscr, link, shared, args),
+    ui = threading.Thread(target=ui_loop,
+                          args=(stdscr, link, ramp, shared, args),
                           daemon=True)
     ui.start()
 
@@ -339,9 +357,8 @@ def run(stdscr, cam, model, link, planner, shared, args):
         if mode == "AUTO" and planner is not None:
             plan = planner.update(feature, sonar, frame.shape)
             shared.plan = plan
-            shared.auto_target = servo_targets(
-                plan["text"], args.turn_deg, args.drive_deg,
-                args.invert_x, args.invert_y)
+            shared.auto_target = servo_preset(
+                plan["text"], args.invert_x, args.invert_y)
         elif mode == "MANUAL":
             shared.plan = None
             shared.auto_target = None
@@ -415,14 +432,11 @@ def main():
     ap.add_argument("--goal", default=os.path.join(here, "guidance",
                                                     "real_front_goal.json"),
                     help="teach.py로 저장한 goal 파일 (자동모드용)")
-    ap.add_argument("--turn-deg", type=float, default=10.0,
-                    help="자동모드 좌/우회전 서보 X 편향각")
-    ap.add_argument("--drive-deg", type=float, default=10.0,
-                    help="자동모드 전/후진 서보 Y 편향각")
+    # 편향각은 hardware/esp32.py의 실측 프리셋을 그대로 사용 (수동/자동 공통)
     ap.add_argument("--invert-x", action="store_true",
-                    help="자동모드 좌/우가 반대로 움직이면 지정")
+                    help="좌/우가 반대로 움직이면 지정 (프리셋 좌우 맞바꿈)")
     ap.add_argument("--invert-y", action="store_true",
-                    help="자동모드 전/후가 반대로 움직이면 지정")
+                    help="전/후가 반대로 움직이면 지정 (프리셋 전후 맞바꿈)")
     # C920 수평 화각: 16:9에서 약 70.4도(=1.229rad) — 지도 위치 추정에 사용
     ap.add_argument("--hfov", type=float, default=1.229)
     ap.add_argument("--display-scale", type=float, default=0.5,
@@ -441,10 +455,12 @@ def main():
         sys.exit(str(e))
 
     link = None
+    ramp = None
     if not args.no_servo:
         try:
             link = ESP32Link(args.serial_port, args.serial_baud)
-            link.send_servo(SERVO_CENTER, SERVO_CENTER)  # 초기 중앙
+            link.send_servo(NEUTRAL_X_DEG, NEUTRAL_Y_DEG)  # 초기 중립(정지)
+            ramp = ServoRamp(link, keepalive=SERVO_KEEPALIVE)
             print(f"ESP32 연결됨 ({args.serial_port})")
         except serial.SerialException as e:
             print(f"ESP32 연결 실패, 초음파/서보 없이 진행: {e}")
@@ -472,18 +488,23 @@ def main():
 
     reason = None
     try:
-        reason = curses.wrapper(run, cam, model, link, planner, shared, args)
+        reason = curses.wrapper(run, cam, model, link, ramp, planner, shared,
+                                args)
     except KeyboardInterrupt:
         reason = "Ctrl-C 종료"
     finally:
         cam.release()
         cv2.destroyAllWindows()
         if link is not None:
-            # 어떤 경로로 끝나든 조이스틱은 중립(정지)으로 되돌리고 종료
+            # 어떤 경로로 끝나든 조이스틱은 중립(정지)으로 되돌리고 종료.
+            # 마지막 송신 위치에서 램프로 복귀 (급점프 → 브라운아웃 방지),
+            # 최대 2초 (최악 이동폭 50도 ≈ 1초).
             try:
-                for _ in range(2):
-                    link.send_servo(SERVO_CENTER, SERVO_CENTER)
-                    time.sleep(0.05)
+                ramp.set_target(NEUTRAL_X_DEG, NEUTRAL_Y_DEG)
+                deadline = time.time() + 2.0
+                while not ramp.settled and time.time() < deadline:
+                    ramp.tick()
+                    time.sleep(0.01)
             except Exception:
                 pass
             link.close()

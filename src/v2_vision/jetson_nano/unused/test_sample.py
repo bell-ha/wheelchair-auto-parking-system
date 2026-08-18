@@ -16,23 +16,43 @@ import serial
 SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 115200
 
-SERVO_STEP_DEG = 0.5
+# ======================================================
+# Joystick servo presets (X / Y)
+# ======================================================
 
 SERVO_MIN_DEG = 0.0
 SERVO_MAX_DEG = 180.0
 
-INITIAL_SERVO_X_DEG = 90.0
-INITIAL_SERVO_Y_DEG = 90.0
+# 실측 조이스틱 위치
+NEUTRAL_X_DEG = 87.0
+NEUTRAL_Y_DEG = 85.0
+
+FORWARD_X_DEG = 87.0
+FORWARD_Y_DEG = 35.0
+
+LEFT_X_DEG = 100.0
+LEFT_Y_DEG = 78.0
+
+RIGHT_X_DEG = 72.0
+RIGHT_Y_DEG = 78.0
+
+REVERSE_X_DEG = 87.0
+REVERSE_Y_DEG = 124.0
+
+INITIAL_SERVO_X_DEG = NEUTRAL_X_DEG
+INITIAL_SERVO_Y_DEG = NEUTRAL_Y_DEG
 
 # 메인 루프 주기
-LOOP_DT = 0.03
+LOOP_DT = 0.02
 
-# Servo command 제한
-COMMAND_INTERVAL = 0.05
+# 목표 위치까지 한 번에 점프하지 않고 조금씩 이동
+# 1.5 deg / 0.03 s ≈ 50 deg/s
+# 전원 꺼짐/부하가 있으면 1.0으로 낮추면 됨
+SERVO_RAMP_STEP_DEG = 1.5
+SERVO_RAMP_INTERVAL = 0.03
 
 # E키 연속 입력 방지
 YAW_TOGGLE_INTERVAL = 0.3
-
 
 # ======================================================
 # State
@@ -86,6 +106,16 @@ def clamp(value: float, min_value: float, max_value: float) -> float:
         min_value,
         min(max_value, value)
     )
+
+
+def approach(current: float, target: float, step: float) -> float:
+    if current < target:
+        return min(current + step, target)
+
+    if current > target:
+        return max(current - step, target)
+
+    return current
 
 
 def fmt(value, unit="", width=8, precision=2) -> str:
@@ -474,10 +504,8 @@ def draw_screen(
         1,
         0,
         (
-            "A/D: Servo X | "
-            "W/S: Servo Y | "
-            "E: Yaw Start/Stop | "
-            "Q: Quit"
+            "W: Forward | A: Left | S: Reverse | D: Right | "
+            "SPACE: Neutral | E: Yaw | Q: Quit"
         )
     )
 
@@ -488,7 +516,7 @@ def draw_screen(
         (
             f"Port: {port} | "
             f"Baud: {SERIAL_BAUD} | "
-            f"Servo Step: {SERVO_STEP_DEG:.1f} deg"
+            f"Ramp: {SERVO_RAMP_STEP_DEG:.1f} deg/{SERVO_RAMP_INTERVAL:.2f}s"
         )
     )
 
@@ -824,15 +852,16 @@ def main(stdscr):
 
     tel = Telemetry()
 
-    target_x = (
-        INITIAL_SERVO_X_DEG
-    )
+    # 사용자가 선택한 최종 목표 위치
+    target_x = INITIAL_SERVO_X_DEG
+    target_y = INITIAL_SERVO_Y_DEG
 
-    target_y = (
-        INITIAL_SERVO_Y_DEG
-    )
+    # 실제로 ESP32에 보내는 위치.
+    # 목표까지 SERVO_RAMP_STEP_DEG씩 접근한다.
+    command_x = INITIAL_SERVO_X_DEG
+    command_y = INITIAL_SERVO_Y_DEG
 
-    last_servo_cmd_time = 0.0
+    last_servo_ramp_time = 0.0
     last_yaw_toggle_time = 0.0
 
     # ==================================================
@@ -873,117 +902,114 @@ def main(stdscr):
 
             key = stdscr.getch()
 
-            changed = False
-
             if key != -1:
 
-                # --------------------------------------
                 # Q = Quit
-                # --------------------------------------
-
                 if key in (
                     ord("q"),
                     ord("Q")
                 ):
-
                     running = False
 
-                # --------------------------------------
                 # E = Yaw start / stop
-                # --------------------------------------
-
                 elif key in (
                     ord("e"),
                     ord("E")
                 ):
-
                     if (
                         now
                         - last_yaw_toggle_time
                         >= YAW_TOGGLE_INTERVAL
                     ):
-
-                        send_yaw_toggle(
-                            ser
-                        )
-
+                        send_yaw_toggle(ser)
                         last_yaw_toggle_time = now
 
-                # --------------------------------------
-                # Servo control
-                # --------------------------------------
-
-                elif (
-                    now
-                    - last_servo_cmd_time
-                    >= COMMAND_INTERVAL
+                # W = 직진
+                elif key in (
+                    ord("w"),
+                    ord("W")
                 ):
+                    target_x = FORWARD_X_DEG
+                    target_y = FORWARD_Y_DEG
 
-                    if key in (
-                        ord("a"),
-                        ord("A")
-                    ):
+                # S = 후진
+                elif key in (
+                    ord("s"),
+                    ord("S")
+                ):
+                    target_x = REVERSE_X_DEG
+                    target_y = REVERSE_Y_DEG
 
-                        target_x -= (
-                            SERVO_STEP_DEG
-                        )
+                # A = 좌회전
+                elif key in (
+                    ord("a"),
+                    ord("A")
+                ):
+                    target_x = LEFT_X_DEG
+                    target_y = LEFT_Y_DEG
 
-                        changed = True
+                # D = 우회전
+                elif key in (
+                    ord("d"),
+                    ord("D")
+                ):
+                    target_x = RIGHT_X_DEG
+                    target_y = RIGHT_Y_DEG
 
-                    elif key in (
-                        ord("d"),
-                        ord("D")
-                    ):
+                # SPACE = 중립
+                elif key == ord(" "):
+                    target_x = NEUTRAL_X_DEG
+                    target_y = NEUTRAL_Y_DEG
 
-                        target_x += (
-                            SERVO_STEP_DEG
-                        )
+            # ==========================================
+            # Servo ramp
+            # 목표 위치까지 일정 간격으로 단계 이동
+            # ==========================================
 
-                        changed = True
+            if (
+                now
+                - last_servo_ramp_time
+                >= SERVO_RAMP_INTERVAL
+            ):
 
-                    elif key in (
-                        ord("w"),
-                        ord("W")
-                    ):
+                next_x = approach(
+                    command_x,
+                    target_x,
+                    SERVO_RAMP_STEP_DEG
+                )
 
-                        target_y += (
-                            SERVO_STEP_DEG
-                        )
+                next_y = approach(
+                    command_y,
+                    target_y,
+                    SERVO_RAMP_STEP_DEG
+                )
 
-                        changed = True
+                next_x = clamp(
+                    next_x,
+                    SERVO_MIN_DEG,
+                    SERVO_MAX_DEG
+                )
 
-                    elif key in (
-                        ord("s"),
-                        ord("S")
-                    ):
+                next_y = clamp(
+                    next_y,
+                    SERVO_MIN_DEG,
+                    SERVO_MAX_DEG
+                )
 
-                        target_y -= (
-                            SERVO_STEP_DEG
-                        )
+                if (
+                    next_x != command_x
+                    or next_y != command_y
+                ):
+                    command_x = next_x
+                    command_y = next_y
 
-                        changed = True
+                    send_servo_command(
+                        ser,
+                        command_x,
+                        command_y
+                    )
 
-                    if changed:
-
-                        target_x = clamp(
-                            target_x,
-                            SERVO_MIN_DEG,
-                            SERVO_MAX_DEG
-                        )
-
-                        target_y = clamp(
-                            target_y,
-                            SERVO_MIN_DEG,
-                            SERVO_MAX_DEG
-                        )
-
-                        send_servo_command(
-                            ser,
-                            target_x,
-                            target_y
-                        )
-
-                        last_servo_cmd_time = now
+                last_servo_ramp_time = now
 
             # ==========================================
             # Serial RX
