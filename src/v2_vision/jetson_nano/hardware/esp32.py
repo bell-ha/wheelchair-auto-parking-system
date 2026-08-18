@@ -46,10 +46,10 @@ REVERSE_X_DEG, REVERSE_Y_DEG = 87.0, 124.0
 # "중립 기준 최대 성분이 이 각도"가 되도록 비율 유지한 채 축소해서 사용.
 # 실차 튜닝은 아래 방향별 값만 바꾸면 됨 (풀 편향 복원 = 50 이상으로).
 # 주의: 조이스틱 데드존보다 작으면 휠체어가 아예 안 움직일 수 있음.
-DEFLECT_LEFT_DEG = 10.0
-DEFLECT_RIGHT_DEG = 13.0      # 실차: 우회전이 약해서 좌보다 크게 (2026-08-18)
-DEFLECT_FORWARD_DEG = 50.0   # 풀 편향
-DEFLECT_BACKWARD_DEG = 39.0  # 풀 편향
+DEFLECT_LEFT_DEG = 8.0
+DEFLECT_RIGHT_DEG = 11.0
+DEFLECT_FORWARD_DEG = 40.0
+DEFLECT_BACKWARD_DEG = 30.0
 
 
 def _scaled_preset(x_deg, y_deg, max_deflect):
