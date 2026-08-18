@@ -42,27 +42,30 @@ LEFT_X_DEG, LEFT_Y_DEG = 100.0, 78.0
 RIGHT_X_DEG, RIGHT_Y_DEG = 72.0, 78.0
 REVERSE_X_DEG, REVERSE_Y_DEG = 87.0, 124.0
 
-# 편향 강도 제한 — 풀 편향은 실차에서 너무 빨라서(2026-08-18 테스트 피드백)
-# 각 프리셋을 "중립 기준 최대 성분이 이 각도"가 되도록 비율 유지한 채 축소.
-# 속도 조절은 이 값 하나만 바꾸면 됨 (풀 편향 복원 = 50 이상으로).
-# 주의: 조이스틱 데드존보다 작으면 휠체어가 아예 안 움직일 수 있음 → 그럴 땐 10~15로.
-MAX_DEFLECT_DEG = 10.0
+# 편향 강도 — 풀 편향은 실차에서 너무 빨라서(2026-08-18 테스트 피드백) 각 프리셋을
+# "중립 기준 최대 성분이 이 각도"가 되도록 비율 유지한 채 축소해서 사용.
+# 실차 튜닝은 아래 방향별 값만 바꾸면 됨 (풀 편향 복원 = 50 이상으로).
+# 주의: 조이스틱 데드존보다 작으면 휠체어가 아예 안 움직일 수 있음.
+DEFLECT_LEFT_DEG = 10.0
+DEFLECT_RIGHT_DEG = 13.0      # 실차: 우회전이 약해서 좌보다 크게 (2026-08-18)
+DEFLECT_FORWARD_DEG = 13.0
+DEFLECT_BACKWARD_DEG = 13.0
 
 
-def _scaled_preset(x_deg, y_deg):
+def _scaled_preset(x_deg, y_deg, max_deflect):
     dx, dy = x_deg - NEUTRAL_X_DEG, y_deg - NEUTRAL_Y_DEG
     biggest = max(abs(dx), abs(dy))
-    k = 1.0 if biggest <= MAX_DEFLECT_DEG else MAX_DEFLECT_DEG / biggest
+    k = 1.0 if biggest <= max_deflect else max_deflect / biggest
     return (round(NEUTRAL_X_DEG + dx * k, 1), round(NEUTRAL_Y_DEG + dy * k, 1))
 
 
 # 지시 문구 규약은 guidance.common.servo_targets와 동일:
 # 이동 지시 4종만 편향, 그 외 문구는 전부 중립=정지로 해석.
 _PRESETS = {
-    "TURN LEFT": _scaled_preset(LEFT_X_DEG, LEFT_Y_DEG),
-    "TURN RIGHT": _scaled_preset(RIGHT_X_DEG, RIGHT_Y_DEG),
-    "MOVE FORWARD": _scaled_preset(FORWARD_X_DEG, FORWARD_Y_DEG),
-    "MOVE BACKWARD": _scaled_preset(REVERSE_X_DEG, REVERSE_Y_DEG),
+    "TURN LEFT": _scaled_preset(LEFT_X_DEG, LEFT_Y_DEG, DEFLECT_LEFT_DEG),
+    "TURN RIGHT": _scaled_preset(RIGHT_X_DEG, RIGHT_Y_DEG, DEFLECT_RIGHT_DEG),
+    "MOVE FORWARD": _scaled_preset(FORWARD_X_DEG, FORWARD_Y_DEG, DEFLECT_FORWARD_DEG),
+    "MOVE BACKWARD": _scaled_preset(REVERSE_X_DEG, REVERSE_Y_DEG, DEFLECT_BACKWARD_DEG),
 }
 _SWAP_X = {"TURN LEFT": "TURN RIGHT", "TURN RIGHT": "TURN LEFT"}
 _SWAP_Y = {"MOVE FORWARD": "MOVE BACKWARD", "MOVE BACKWARD": "MOVE FORWARD"}
