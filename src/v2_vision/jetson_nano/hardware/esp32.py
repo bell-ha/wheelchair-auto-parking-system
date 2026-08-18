@@ -46,7 +46,7 @@ REVERSE_X_DEG, REVERSE_Y_DEG = 87.0, 124.0
 # 각 프리셋을 "중립 기준 최대 성분이 이 각도"가 되도록 비율 유지한 채 축소.
 # 속도 조절은 이 값 하나만 바꾸면 됨 (풀 편향 복원 = 50 이상으로).
 # 주의: 조이스틱 데드존보다 작으면 휠체어가 아예 안 움직일 수 있음 → 그럴 땐 10~15로.
-MAX_DEFLECT_DEG = 5.0
+MAX_DEFLECT_DEG = 10.0
 
 
 def _scaled_preset(x_deg, y_deg):
