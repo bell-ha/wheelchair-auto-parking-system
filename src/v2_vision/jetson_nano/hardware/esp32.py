@@ -36,18 +36,33 @@ SERVO_MAX_DEG = 180.0
 # ------------------------------------------------------
 
 NEUTRAL_X_DEG, NEUTRAL_Y_DEG = 87.0, 85.0
+# 아래 4개는 "조이스틱을 끝까지 꺾었을 때"의 실측 풀 편향 원본 (참고·보존용)
 FORWARD_X_DEG, FORWARD_Y_DEG = 87.0, 35.0
 LEFT_X_DEG, LEFT_Y_DEG = 100.0, 78.0
 RIGHT_X_DEG, RIGHT_Y_DEG = 72.0, 78.0
 REVERSE_X_DEG, REVERSE_Y_DEG = 87.0, 124.0
 
+# 편향 강도 제한 — 풀 편향은 실차에서 너무 빨라서(2026-08-18 테스트 피드백)
+# 각 프리셋을 "중립 기준 최대 성분이 이 각도"가 되도록 비율 유지한 채 축소.
+# 속도 조절은 이 값 하나만 바꾸면 됨 (풀 편향 복원 = 50 이상으로).
+# 주의: 조이스틱 데드존보다 작으면 휠체어가 아예 안 움직일 수 있음 → 그럴 땐 10~15로.
+MAX_DEFLECT_DEG = 5.0
+
+
+def _scaled_preset(x_deg, y_deg):
+    dx, dy = x_deg - NEUTRAL_X_DEG, y_deg - NEUTRAL_Y_DEG
+    biggest = max(abs(dx), abs(dy))
+    k = 1.0 if biggest <= MAX_DEFLECT_DEG else MAX_DEFLECT_DEG / biggest
+    return (round(NEUTRAL_X_DEG + dx * k, 1), round(NEUTRAL_Y_DEG + dy * k, 1))
+
+
 # 지시 문구 규약은 guidance.common.servo_targets와 동일:
 # 이동 지시 4종만 편향, 그 외 문구는 전부 중립=정지로 해석.
 _PRESETS = {
-    "TURN LEFT": (LEFT_X_DEG, LEFT_Y_DEG),
-    "TURN RIGHT": (RIGHT_X_DEG, RIGHT_Y_DEG),
-    "MOVE FORWARD": (FORWARD_X_DEG, FORWARD_Y_DEG),
-    "MOVE BACKWARD": (REVERSE_X_DEG, REVERSE_Y_DEG),
+    "TURN LEFT": _scaled_preset(LEFT_X_DEG, LEFT_Y_DEG),
+    "TURN RIGHT": _scaled_preset(RIGHT_X_DEG, RIGHT_Y_DEG),
+    "MOVE FORWARD": _scaled_preset(FORWARD_X_DEG, FORWARD_Y_DEG),
+    "MOVE BACKWARD": _scaled_preset(REVERSE_X_DEG, REVERSE_Y_DEG),
 }
 _SWAP_X = {"TURN LEFT": "TURN RIGHT", "TURN RIGHT": "TURN LEFT"}
 _SWAP_Y = {"MOVE FORWARD": "MOVE BACKWARD", "MOVE BACKWARD": "MOVE FORWARD"}

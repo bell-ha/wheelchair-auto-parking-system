@@ -258,7 +258,7 @@ class AlignmentPlanner:
         return out
 
 
-def servo_targets(text, turn_deg=10.0, drive_deg=10.0,
+def servo_targets(text, turn_deg=5.0, drive_deg=5.0,
                   invert_x=False, invert_y=False):
     """지시 문구 → 서보 목표각 (x, y). 이동 지시 4개만 편향, 나머지는 중앙=정지.
 

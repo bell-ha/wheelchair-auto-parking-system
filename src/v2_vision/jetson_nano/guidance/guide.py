@@ -178,9 +178,9 @@ def parse_args():
     # 서보(조이스틱 액추에이터) 실구동 — 기본은 화면 표시만
     parser.add_argument('--drive', action='store_true',
                         help='지시를 서보로 실제 전송 (첫 테스트는 휠체어 전원 OFF로!)')
-    parser.add_argument('--turn-deg', type=float, default=10.0,
+    parser.add_argument('--turn-deg', type=float, default=5.0,
                         help='좌/우회전 시 서보 X 편향각 (중앙 90 기준, 기본 10)')
-    parser.add_argument('--drive-deg', type=float, default=10.0,
+    parser.add_argument('--drive-deg', type=float, default=5.0,
                         help='전/후진 시 서보 Y 편향각 (중앙 90 기준, 기본 10)')
     parser.add_argument('--invert-x', action='store_true',
                         help='좌/우 방향이 반대로 움직이면 지정')
