@@ -6,12 +6,11 @@
 피드백 방식 사용: 이동 시작 순간의 yaw를 0점 잡고, 벗어난 만큼 서보 X를
 반대로 미세 편향. 오차가 줄 때까지 계속 보정하므로 권한이 변해도 수렴한다.
 
-키:
-  W = 전진   S = 후진   A/D = 좌/우회전(보정 없음)   SPACE = 정지
-  C = 직진 보정 ON/OFF (기본 OFF — 먼저 OFF로 휘는 것 확인 후 ON과 비교)
-  I = 보정 방향 반전 (보정 켰는데 더 휘면 = 부호 반대 → I 한 번)
-  E = yaw 측정 토글 (꺼져 있으면 정지 상태에서 켤 것 — 캘리브레이션 몇 초)
+키 (평소엔 W/A/S/D/SPACE만 쓰면 됨 — 나머지는 전부 자동):
+  W = 전진(현재 방위각 유지)   S = 후진   A/D = 좌/우회전   SPACE = 정지
   Q = 종료 (중립 복귀 후 종료)
+  [자동화됨] 보정 기본 ON (C로 끄기) / 부호 실측값 고정 (I로 반전) /
+             yaw는 시작 시 자동 캘리브레이션 (E로 수동 토글)
 
 안전:
   - 전진 중 전방 초음파 30cm 미만 → 자동 정지 (센서 전원 꺼져 있으면 무력!)
@@ -86,7 +85,7 @@ def run(stdscr, link, writer, fp, log_path):
     ramp = ServoRamp(link, step_deg=2.5, keepalive=0.5)  # 83°/s — 브라운아웃/삐소리 나면 2.0으로
     state = "STOP"
     note = ""
-    corr_on = False
+    corr_on = True   # 검증 완료 — 기본 ON (C로 끌 수 있음)
     corr_sign = CORR_SIGN_DEFAULT
     yaw0 = None               # 이동 시작 순간의 yaw (상대 0점)
     n_samples = 0
@@ -215,6 +214,22 @@ def main():
     except serial.SerialException as e:
         sys.exit(f"ESP32 연결 실패: {e}")
     print(f"연결됨 — 기록 파일: {log_path}")
+
+    # yaw 측정 자동 시작 (이미 켜져 있으면 그대로 둠 — 토글이라 또 보내면 꺼짐)
+    t0 = time.time()
+    while time.time() - t0 < 1.5:
+        link.poll(); time.sleep(0.05)
+    if not link.telemetry.get("yaw_active"):
+        print("IMU yaw 캘리브레이션 시작 — 휠체어를 몇 초간 정지 상태로 두세요...")
+        link.send_yaw_toggle()
+        t0 = time.time()
+        while time.time() - t0 < 12:
+            link.poll()
+            if link.telemetry.get("yaw_active"):
+                break
+            time.sleep(0.1)
+    print("yaw:", "측정 시작됨 ✓" if link.telemetry.get("yaw_active")
+          else "시작 실패 — 화면에서 E로 수동 시도")
 
     with open(log_path, "w", newline="", encoding="utf-8") as fp:
         writer = csv.DictWriter(fp, fieldnames=CSV_FIELDS)
