@@ -42,11 +42,11 @@ YAW_TOGGLE_COOLDOWN = 0.5
 # ---- 직진 보정 파라미터 (2026-08-25 실측 기반) ----
 # 실측 부호 규약: 좌회전(X+) 명령 → yaw 증가. 따라서 +오차엔 -X(우회전) 보정.
 CORR_SIGN_DEFAULT = -1.0
-CORR_KP = 1.5             # yaw 오차 1도당 서보 X 보정 각도
+CORR_KP = 2.5             # yaw 오차 1도당 서보 X 보정 각도
 # 실측 드리프트가 최대 ~8°/s인데 우회전 풀 권한이 3.6°/s뿐 —
 # 보정 상한을 풀 회전 수준까지 열어야 싸움이 됨 (6이었을 땐 역부족)
 CORR_MAX_DEG = 13.0
-CORR_DEADBAND_DEG = 1.0   # 이 안쪽 오차는 무시 (미세 떨림 방지)
+CORR_DEADBAND_DEG = 0.5   # 이 안쪽 오차는 무시 (미세 떨림 방지)
 
 CSV_FIELDS = ["t", "state", "corr_on", "corr_sign", "yaw0", "yaw", "yaw_err", "corr_x",
               "front", "left_front", "left_rear", "right_front", "right_rear",
@@ -83,7 +83,7 @@ def run(stdscr, link, writer, fp, log_path):
     stdscr.nodelay(True)
     stdscr.timeout(1)
 
-    ramp = ServoRamp(link, keepalive=0.5)
+    ramp = ServoRamp(link, step_deg=2.5, keepalive=0.5)  # 83°/s — 브라운아웃/삐소리 나면 2.0으로
     state = "STOP"
     note = ""
     corr_on = False
@@ -106,9 +106,13 @@ def run(stdscr, link, writer, fp, log_path):
             if key in (ord("q"), ord("Q")):
                 break
             elif key in (ord("w"), ord("W")):
-                state, note, yaw0 = "MOVE FORWARD", "", yaw
+                if state != "MOVE FORWARD":     # 연타로 기준 방위각이 풀리지 않게
+                    yaw0 = yaw
+                state, note = "MOVE FORWARD", ""
             elif key in (ord("s"), ord("S")):
-                state, note, yaw0 = "MOVE BACKWARD", "", yaw
+                if state != "MOVE BACKWARD":
+                    yaw0 = yaw
+                state, note = "MOVE BACKWARD", ""
             elif key in (ord("a"), ord("A")):
                 state, note, yaw0 = "TURN LEFT", "", None   # 의도된 회전 — 보정 없음
             elif key in (ord("d"), ord("D")):
