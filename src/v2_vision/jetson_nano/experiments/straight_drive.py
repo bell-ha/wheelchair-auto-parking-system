@@ -1,21 +1,23 @@
-"""전/후진 드리프트 계측 도구 — 카메라/YOLO 없이 시리얼만 사용 (시작 ~3초).
+"""전/후진 직진 유지 실험 도구 — IMU(yaw) 피드백 보정 내장. 카메라/YOLO 불필요.
 
-앞바퀴(캐스터)가 어느 쪽으로 틀어져 있는지 모르는 상태에서 전/후진 명령이
-실제로 얼마나·어느 쪽으로 휘는지를 초음파(+IMU yaw)로 정량 기록한다.
-여기서 얻은 데이터가 2단계(센서 피드백 직진 보정 루프)의 설계 근거가 됨.
+배경: 캐스터(앞바퀴)가 어디로 틀어져 있는지에 따라 전/후진이 매번 다르게 휨
+(실측: 전진 -0.9~+1.7°/s, 후진 +2.1°/s — 방향도 상황마다 바뀜). 회전 권한도
+상황마다 달라서 상수로 예측 불가 → 그래서 "정확한 상수"가 필요 없는
+피드백 방식 사용: 이동 시작 순간의 yaw를 0점 잡고, 벗어난 만큼 서보 X를
+반대로 미세 편향. 오차가 줄 때까지 계속 보정하므로 권한이 변해도 수렴한다.
 
 키:
-  W = 전진   S = 후진   SPACE = 정지
-  E = yaw 측정 토글 (첫 토글은 캘리브레이션 — 반드시 정지 상태에서!)
+  W = 전진   S = 후진   A/D = 좌/우회전(보정 없음)   SPACE = 정지
+  C = 직진 보정 ON/OFF (기본 OFF — 먼저 OFF로 휘는 것 확인 후 ON과 비교)
+  I = 보정 방향 반전 (보정 켰는데 더 휘면 = 부호 반대 → I 한 번)
+  E = yaw 측정 토글 (꺼져 있으면 정지 상태에서 켤 것 — 캘리브레이션 몇 초)
   Q = 종료 (중립 복귀 후 종료)
 
 안전:
-  - 전진 중 전방 초음파가 30cm 미만이면 자동 정지
+  - 전진 중 전방 초음파 30cm 미만 → 자동 정지 (센서 전원 꺼져 있으면 무력!)
   - 어떤 경로로 끝나든 조이스틱 중립 복귀
 
-기록: experiments/logs/drive_<시각>.csv — 0.1초마다 상태+센서 전부.
-      해석 예: 전진 중 right_front-right_rear 차이가 커지면 = 우측 벽 대비
-      기울어지는 중 = 휘고 있음. yaw가 있으면 그게 가장 직접적인 지표.
+기록: experiments/logs/drive_<시각>.csv (10Hz, 1초마다 flush)
 """
 import csv
 import curses
@@ -29,7 +31,7 @@ import serial
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 from hardware.esp32 import (ESP32Link, ServoRamp, NEUTRAL_X_DEG, NEUTRAL_Y_DEG,
-                            servo_preset)
+                            clamp, servo_preset)
 
 LOOP_DT = 0.03            # 키 폴링 ~33Hz
 LOG_INTERVAL = 0.1        # CSV 기록 10Hz
@@ -37,9 +39,14 @@ DRAW_INTERVAL = 0.1
 FRONT_STOP_CM = 30.0      # 전진 중 이 거리 미만이면 자동 정지
 YAW_TOGGLE_COOLDOWN = 0.5
 
-CSV_FIELDS = ["t", "state", "front", "left_front", "left_rear",
-              "right_front", "right_rear", "yaw", "gyro_z",
-              "cmd_x", "cmd_y", "echo_x", "echo_y"]
+# ---- 직진 보정 파라미터 (피드백이라 정밀할 필요 없음 — 현장에서 감으로 조정) ----
+CORR_KP = 1.0             # yaw 오차 1도당 서보 X 보정 각도
+CORR_MAX_DEG = 6.0        # 보정 상한 (풀 회전 프리셋 8~11도보다 작게)
+CORR_DEADBAND_DEG = 1.0   # 이 안쪽 오차는 무시 (미세 떨림 방지)
+
+CSV_FIELDS = ["t", "state", "corr_on", "yaw0", "yaw", "yaw_err", "corr_x",
+              "front", "left_front", "left_rear", "right_front", "right_rear",
+              "gyro_z", "cmd_x", "cmd_y", "echo_x", "echo_y"]
 
 
 def fmt(v, width=7):
@@ -58,6 +65,15 @@ def put(stdscr, y, text):
         pass
 
 
+def get_yaw(tel):
+    if not tel.get("yaw_active"):
+        return None
+    try:
+        return float(tel.get("yaw"))
+    except (TypeError, ValueError):
+        return None
+
+
 def run(stdscr, link, writer, fp, log_path):
     curses.curs_set(0)
     stdscr.nodelay(True)
@@ -66,6 +82,9 @@ def run(stdscr, link, writer, fp, log_path):
     ramp = ServoRamp(link, keepalive=0.5)
     state = "STOP"
     note = ""
+    corr_on = False
+    corr_sign = 1.0
+    yaw0 = None               # 이동 시작 순간의 yaw (상대 0점)
     n_samples = 0
     t0 = time.monotonic()
     last_log = 0.0
@@ -74,6 +93,8 @@ def run(stdscr, link, writer, fp, log_path):
 
     while True:
         now = time.monotonic()
+        tel = link.poll()
+        yaw = get_yaw(tel)
 
         # 1. 키 입력
         key = stdscr.getch()
@@ -81,41 +102,63 @@ def run(stdscr, link, writer, fp, log_path):
             if key in (ord("q"), ord("Q")):
                 break
             elif key in (ord("w"), ord("W")):
-                state, note = "MOVE FORWARD", ""
+                state, note, yaw0 = "MOVE FORWARD", "", yaw
             elif key in (ord("s"), ord("S")):
-                state, note = "MOVE BACKWARD", ""
+                state, note, yaw0 = "MOVE BACKWARD", "", yaw
+            elif key in (ord("a"), ord("A")):
+                state, note, yaw0 = "TURN LEFT", "", None   # 의도된 회전 — 보정 없음
+            elif key in (ord("d"), ord("D")):
+                state, note, yaw0 = "TURN RIGHT", "", None
             elif key == ord(" "):
-                state, note = "STOP", ""
+                state, note, yaw0 = "STOP", "", None
+            elif key in (ord("c"), ord("C")):
+                corr_on = not corr_on
+            elif key in (ord("i"), ord("I")):
+                corr_sign = -corr_sign
             elif key in (ord("e"), ord("E")):
                 if now - last_yaw_toggle > YAW_TOGGLE_COOLDOWN:
                     link.send_yaw_toggle()
                     last_yaw_toggle = now
 
-        # 2. 수신 + 전방 자동 정지
-        tel = link.poll()
-        front = tel.get("front")
+        # 2. 전방 자동 정지
         try:
-            front_v = float(front)
+            front_v = float(tel.get("front"))
         except (TypeError, ValueError):
             front_v = -1.0
         if state == "MOVE FORWARD" and 0.0 < front_v < FRONT_STOP_CM:
-            state = "STOP"
+            state, yaw0 = "STOP", None
             note = f"!! 전방 {front_v:.0f}cm — 자동 정지"
 
-        # 3. 서보 (프리셋 → 램프로 접근)
-        ramp.set_target(*servo_preset(state))
+        # 3. 서보 목표 = 프리셋 + (이동 중이면) yaw 보정
+        base_x, base_y = servo_preset(state)
+        yaw_err = None
+        corr_x = 0.0
+        moving = state in ("MOVE FORWARD", "MOVE BACKWARD")
+        if moving and corr_on and yaw is not None and yaw0 is not None:
+            yaw_err = yaw - yaw0
+            if abs(yaw_err) > CORR_DEADBAND_DEG:
+                corr_x = clamp(CORR_KP * yaw_err, -CORR_MAX_DEG, CORR_MAX_DEG)
+                corr_x *= corr_sign
+                if state == "MOVE BACKWARD":
+                    # 후진에선 조향 반응이 반대 (자동차 후진 핸들과 동일 원리).
+                    # 실측: 전진은 이 부호로 0.5° 유지 성공, 후진은 +30° 폭주 → 반전 필요
+                    corr_x = -corr_x
+        ramp.set_target(clamp(base_x + corr_x), base_y)
         ramp.tick()
 
         # 4. CSV 기록 (10Hz)
         if now - last_log >= LOG_INTERVAL:
             writer.writerow({
                 "t": round(now - t0, 2), "state": state,
+                "corr_on": int(corr_on), "yaw0": yaw0, "yaw": tel.get("yaw"),
+                "yaw_err": (round(yaw_err, 2) if yaw_err is not None else None),
+                "corr_x": round(corr_x, 1),
                 "front": tel.get("front"),
                 "left_front": tel.get("left_front"),
                 "left_rear": tel.get("left_rear"),
                 "right_front": tel.get("right_front"),
                 "right_rear": tel.get("right_rear"),
-                "yaw": tel.get("yaw"), "gyro_z": tel.get("gyro_z"),
+                "gyro_z": tel.get("gyro_z"),
                 "cmd_x": ramp.command_x, "cmd_y": ramp.command_y,
                 "echo_x": tel.get("servo_x"), "echo_y": tel.get("servo_y"),
             })
@@ -127,18 +170,22 @@ def run(stdscr, link, writer, fp, log_path):
         # 5. 화면 (10Hz)
         if now - last_draw >= DRAW_INTERVAL:
             stdscr.erase()
-            put(stdscr, 0, "전/후진 드리프트 계측 — W=전진 S=후진 SPACE=정지 E=yaw토글 Q=종료")
+            put(stdscr, 0, "직진 유지 — W전진 S후진 A좌 D우 SPACE정지 | C보정 I부호 | E yaw Q종료")
             put(stdscr, 2, f"상태: {state}   {note}")
-            put(stdscr, 4, f"서보 명령 x={ramp.command_x:5.1f} y={ramp.command_y:5.1f}"
+            corr_txt = f"보정: {'★ ON' if corr_on else 'OFF'} (부호 {'+' if corr_sign > 0 else '-'})"
+            if yaw_err is not None:
+                corr_txt += f"   yaw오차 {yaw_err:+.1f}° → 보정 {corr_x:+.1f}°"
+            put(stdscr, 3, corr_txt)
+            put(stdscr, 5, f"서보 명령 x={ramp.command_x:5.1f} y={ramp.command_y:5.1f}"
                             f"   에코 x={fmt(tel.get('servo_x'), 5)} y={fmt(tel.get('servo_y'), 5)}")
-            put(stdscr, 6, f"전방(cm): {fmt(front)}   (전진 자동정지: {FRONT_STOP_CM:.0f}cm)")
-            put(stdscr, 7, f"우측(cm): 앞 {fmt(tel.get('right_front'))}  뒤 {fmt(tel.get('right_rear'))}"
-                            f"   차이 = 기울어짐 지표")
-            put(stdscr, 8, f"좌측(cm): 앞 {fmt(tel.get('left_front'))}  뒤 {fmt(tel.get('left_rear'))}")
             yaw_state = ("측정중" if tel.get("yaw_active") else
-                         "캘리브레이션중" if tel.get("yaw_calibrating") else "꺼짐(E로 시작)")
-            put(stdscr, 10, f"IMU yaw: {fmt(tel.get('yaw'))} deg  [{yaw_state}]"
-                             f"   gyro_z {fmt(tel.get('gyro_z'))}")
+                         "캘리브레이션중" if tel.get("yaw_calibrating") else "꺼짐(E로 시작!)")
+            put(stdscr, 7, f"IMU yaw: {fmt(tel.get('yaw'))}°  [{yaw_state}]"
+                            f"   이동시작 0점: {fmt(yaw0)}")
+            put(stdscr, 9, f"전방(cm): {fmt(tel.get('front'))}  (자동정지 {FRONT_STOP_CM:.0f}cm"
+                            f" — 센서 전원 꺼져있으면 무력!)")
+            put(stdscr, 10, f"우측(cm): 앞 {fmt(tel.get('right_front'))}"
+                             f"  뒤 {fmt(tel.get('right_rear'))}")
             put(stdscr, 12, f"기록: {n_samples}줄 → {log_path.name}")
             rx = link.rx_age()
             put(stdscr, 13, f"ESP32 수신: {fmt(rx, 5)}s 전" + ("  !! 수신 끊김" if (rx or 99) > 1 else ""))
@@ -178,7 +225,7 @@ def main():
             link.close()
 
     print(f"종료 — 기록: {log_path}")
-    print("분석하려면 이 파일을 알려주세요 (드리프트 방향/크기 정리해드림)")
+    print("보정 OFF 주행과 ON 주행을 비교 분석하려면 파일명을 알려주세요")
 
 
 if __name__ == "__main__":
