@@ -39,12 +39,16 @@ DRAW_INTERVAL = 0.1
 FRONT_STOP_CM = 30.0      # 전진 중 이 거리 미만이면 자동 정지
 YAW_TOGGLE_COOLDOWN = 0.5
 
-# ---- 직진 보정 파라미터 (피드백이라 정밀할 필요 없음 — 현장에서 감으로 조정) ----
-CORR_KP = 1.0             # yaw 오차 1도당 서보 X 보정 각도
-CORR_MAX_DEG = 6.0        # 보정 상한 (풀 회전 프리셋 8~11도보다 작게)
+# ---- 직진 보정 파라미터 (2026-08-25 실측 기반) ----
+# 실측 부호 규약: 좌회전(X+) 명령 → yaw 증가. 따라서 +오차엔 -X(우회전) 보정.
+CORR_SIGN_DEFAULT = -1.0
+CORR_KP = 1.5             # yaw 오차 1도당 서보 X 보정 각도
+# 실측 드리프트가 최대 ~8°/s인데 우회전 풀 권한이 3.6°/s뿐 —
+# 보정 상한을 풀 회전 수준까지 열어야 싸움이 됨 (6이었을 땐 역부족)
+CORR_MAX_DEG = 13.0
 CORR_DEADBAND_DEG = 1.0   # 이 안쪽 오차는 무시 (미세 떨림 방지)
 
-CSV_FIELDS = ["t", "state", "corr_on", "yaw0", "yaw", "yaw_err", "corr_x",
+CSV_FIELDS = ["t", "state", "corr_on", "corr_sign", "yaw0", "yaw", "yaw_err", "corr_x",
               "front", "left_front", "left_rear", "right_front", "right_rear",
               "gyro_z", "cmd_x", "cmd_y", "echo_x", "echo_y"]
 
@@ -83,7 +87,7 @@ def run(stdscr, link, writer, fp, log_path):
     state = "STOP"
     note = ""
     corr_on = False
-    corr_sign = 1.0
+    corr_sign = CORR_SIGN_DEFAULT
     yaw0 = None               # 이동 시작 순간의 yaw (상대 0점)
     n_samples = 0
     t0 = time.monotonic()
@@ -150,7 +154,8 @@ def run(stdscr, link, writer, fp, log_path):
         if now - last_log >= LOG_INTERVAL:
             writer.writerow({
                 "t": round(now - t0, 2), "state": state,
-                "corr_on": int(corr_on), "yaw0": yaw0, "yaw": tel.get("yaw"),
+                "corr_on": int(corr_on), "corr_sign": int(corr_sign),
+                "yaw0": yaw0, "yaw": tel.get("yaw"),
                 "yaw_err": (round(yaw_err, 2) if yaw_err is not None else None),
                 "corr_x": round(corr_x, 1),
                 "front": tel.get("front"),
