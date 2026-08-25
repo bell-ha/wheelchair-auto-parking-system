@@ -12,11 +12,13 @@
   3) 적분항이 '지금 이 캐스터를 이기는 데 필요한 편향'을 주행 중 학습해서 물고
      있는다. 덕분에 틀어짐 패턴을 몰라도, 매번 달라져도 수렴한다.
 
-키 (평소엔 W/A/S/D/SPACE만 쓰면 됨 — 나머지는 전부 자동):
-  W = 전진(현재 방위각 유지)   S = 후진   A/D = 좌/우회전   SPACE = 정지
-  Q = 종료 (중립 복귀 후 종료)
-  [자동화됨] 보정 기본 ON (C로 끄기) / 부호 실측값 고정 (I로 반전) /
-             yaw는 시작 시 자동 캘리브레이션 (E로 수동 토글)
+키:
+  W = 전진   S = 후진   A/D = 좌/우회전(보정 없음)   SPACE = 정지   Q = 종료
+  I = 기준 방위각 고정/해제
+      - 안 누르면: W/S를 누른 그 순간의 방위각을 그 구간 동안 유지
+      - 누르면:   그때의 방위각을 못박아, A/D로 돌린 뒤에 W를 눌러도
+                  무조건 그 방위각으로 되돌아온다 (해제 전까지)
+  보정 ON/부호/yaw 켜기는 전부 자동이라 따로 누를 키가 없다.
 
 안전:
   - 전진 중 전방 초음파 30cm 미만 → 자동 정지 (센서 전원 꺼져 있으면 무력!)
@@ -43,7 +45,6 @@ LOOP_DT = 0.03            # 키 폴링 ~33Hz
 LOG_INTERVAL = 0.1        # CSV 기록 10Hz
 DRAW_INTERVAL = 0.1
 FRONT_STOP_CM = 30.0      # 전진 중 이 거리 미만이면 자동 정지
-YAW_TOGGLE_COOLDOWN = 0.5
 
 # ---- 직진 보정 파라미터 (2026-08-25 실주행 로그 재튜닝) ----
 # 부호 규약(실측): 서보 X + (좌) → yaw 증가 → gyro_z 양수. 후진은 반응이 반대.
@@ -53,9 +54,11 @@ YAW_TOGGLE_COOLDOWN = 0.5
 #   없어서 반대쪽으로 넘어가고, 그러면 또 반대로 꺾어서 좌우 진동이 났다.
 #   → 각도로 "목표 회전속도"를 정하고 자이로로 그 속도를 맞추는 2단(캐스케이드) 구조.
 #     오차가 줄면 목표 속도도 같이 줄어드니 스스로 감속한다.
-CORR_SIGN_DEFAULT = 1.0
 CORR_TAU = 1.5            # 방위 오차를 이 시간(초)에 걸쳐 되돌린다 (작을수록 공격적)
-CORR_RATE_MAX = 5.0       # 목표 회전속도 상한 °/s — 실측 드리프트(3~5°/s)를 이기는 선
+# 목표 회전속도 상한 °/s. 평소 주행에선 오차가 작아 3~5°/s밖에 안 쓰고, I로 고정해둔
+# 방위각에서 크게 벗어난 뒤(A/D 회전 후) 되돌아올 때만 여기까지 쓴다.
+# 시뮬: 50° 복귀에 5→11초, 10→7초, 16이면 오버슈트 발생 → 10이 안전한 최대치.
+CORR_RATE_MAX = 10.0
 CORR_KR = 0.4             # 회전속도 오차 1°/s당 서보 X (실측: 데드존 위 1° ≈ 3°/s)
 # 적분항: 캐스터가 만드는 '일정한 틀어짐'을 주행 중 스스로 학습해서 물고 있는다.
 # 이게 없으면 회전만 멈추고 6° 틀어진 채로 평행 주행함(시뮬 확인).
@@ -76,7 +79,7 @@ CORR_ABORT_DEG = 30.0     # 이만큼 벌어지면 보정이 오히려 악화 �
 REF_SETTLE_RATE = 4.0     # 기준 방위각은 회전이 이만큼 잦아든 뒤 잡는다 (°/s)
 REF_MAX_WAIT = 1.2        # 안 잦아들면 이 시간 후 그냥 잡음 (초)
 
-CSV_FIELDS = ["t", "state", "corr_on", "corr_sign", "yaw0", "yaw", "yaw_err",
+CSV_FIELDS = ["t", "state", "lock", "yaw0", "yaw", "yaw_err",
               "rate_tgt", "bias", "corr_x",
               "front", "left_front", "left_rear", "right_front", "right_rear",
               "gyro_z", "cmd_x", "cmd_y", "echo_x", "echo_y"]
@@ -123,11 +126,13 @@ def run(stdscr, link, writer, fp, log_path):
     ramp = ServoRamp(link, step_deg=2.5, keepalive=0.5)  # 83°/s — 브라운아웃/삐소리 나면 2.0으로
     state = "STOP"
     note = ""
-    corr_on = True   # 검증 완료 — 기본 ON (C로 끌 수 있음)
-    corr_sign = CORR_SIGN_DEFAULT
-    yaw0 = None               # 이동 시작 순간의 yaw (상대 0점)
+    yaw0 = None               # 지금 맞추려는 기준 방위각
     ref_pending = False       # 기준 방위각 대기중 (묵은 값 대신 새 값으로 잡으려고)
     ref_since = 0.0
+    lock_mode = False         # I로 고정한 상태인가 (해제 전까지 이 방위각만 고수)
+    yaw_lock = None
+    lock_pending = False
+    err_start = None          # 구간 시작 시 오차 (여기서 더 벌어지면 이상 신호)
     bias = 0.0                # 주행 중 학습한 '틀어짐 상쇄' 편향
     prev_now = time.monotonic()
     last_yaw_val = None
@@ -136,7 +141,6 @@ def run(stdscr, link, writer, fp, log_path):
     t0 = time.monotonic()
     last_log = 0.0
     last_draw = 0.0
-    last_yaw_toggle = 0.0
 
     while True:
         now = time.monotonic()
@@ -156,29 +160,32 @@ def run(stdscr, link, writer, fp, log_path):
         if key != -1:
             if key in (ord("q"), ord("Q")):
                 break
-            elif key in (ord("w"), ord("W")):
-                if state != "MOVE FORWARD":     # 연타로 기준 방위각이 풀리지 않게
-                    yaw0, ref_pending, ref_since, bias = None, True, now, 0.0
-                state, note = "MOVE FORWARD", ""
-            elif key in (ord("s"), ord("S")):
-                if state != "MOVE BACKWARD":
-                    yaw0, ref_pending, ref_since, bias = None, True, now, 0.0
-                state, note = "MOVE BACKWARD", ""
-            elif key in (ord("a"), ord("A")):
-                # 의도된 회전 — 보정 없음
-                state, note, yaw0, ref_pending, bias = "TURN LEFT", "", None, False, 0.0
-            elif key in (ord("d"), ord("D")):
-                state, note, yaw0, ref_pending, bias = "TURN RIGHT", "", None, False, 0.0
+            elif key in (ord("w"), ord("W"), ord("s"), ord("S")):
+                want_state = "MOVE FORWARD" if key in (ord("w"), ord("W")) else "MOVE BACKWARD"
+                if state != want_state:     # 연타로 기준 방위각이 풀리지 않게
+                    bias, err_start = 0.0, None
+                    if lock_mode and yaw_lock is not None:
+                        yaw0, ref_pending = yaw_lock, False   # 고정된 방위각으로 복귀
+                    else:
+                        yaw0, ref_pending, ref_since = None, True, now
+                state, note = want_state, ""
+            elif key in (ord("a"), ord("A"), ord("d"), ord("D")):
+                # 의도된 회전 — 보정 없음. 고정해둔 방위각은 그대로 살려둔다.
+                state = "TURN LEFT" if key in (ord("a"), ord("A")) else "TURN RIGHT"
+                note, yaw0, ref_pending, bias, err_start = "", None, False, 0.0, None
             elif key == ord(" "):
-                state, note, yaw0, ref_pending, bias = "STOP", "", None, False, 0.0
-            elif key in (ord("c"), ord("C")):
-                corr_on = not corr_on
+                state, note = "STOP", ""
+                yaw0, ref_pending, bias, err_start = None, False, 0.0, None
             elif key in (ord("i"), ord("I")):
-                corr_sign = -corr_sign
-            elif key in (ord("e"), ord("E")):
-                if now - last_yaw_toggle > YAW_TOGGLE_COOLDOWN:
-                    link.send_yaw_toggle()
-                    last_yaw_toggle = now
+                # 기준 방위각 고정/해제. 고정하면 A/D로 돌린 뒤에도 W/S가
+                # 매번 새로 잡지 않고 무조건 이 방위각으로 되돌아온다.
+                if lock_mode:
+                    lock_mode, yaw_lock, lock_pending = False, None, False
+                    note = "기준 고정 해제 — 이제 W/S 누른 방향을 유지"
+                else:
+                    lock_mode, lock_pending = True, True
+                    ref_pending, ref_since = True, now
+                    note = "기준 방위각 고정 중..."
 
         # 2. 전방 자동 정지
         try:
@@ -186,7 +193,8 @@ def run(stdscr, link, writer, fp, log_path):
         except (TypeError, ValueError):
             front_v = -1.0
         if state == "MOVE FORWARD" and 0.0 < front_v < FRONT_STOP_CM:
-            state, yaw0, ref_pending, bias = "STOP", None, False, 0.0
+            state, yaw0, ref_pending = "STOP", None, False
+            bias, err_start = 0.0, None
             note = f"!! 전방 {front_v:.0f}cm — 자동 정지"
 
         # 3. 서보 목표 = 프리셋 + (이동 중이면) yaw 보정
@@ -199,15 +207,23 @@ def run(stdscr, link, writer, fp, log_path):
         if ref_pending and yaw_fresh:
             if (gz is None or abs(gz) < REF_SETTLE_RATE) or (now - ref_since) > REF_MAX_WAIT:
                 yaw0, ref_pending = yaw, False
+                if lock_pending:            # I로 고정 요청한 건 여기서 확정
+                    yaw_lock, lock_pending = yaw, False
+                    note = f"기준 방위각 {yaw:.1f}° 고정 — 앞으로 여기만 맞춥니다"
 
         # 3b. 캐스케이드 보정: 방위 오차 → 목표 회전속도 → 자이로로 그 속도를 맞춤.
         #     오차가 줄면 목표 속도도 같이 줄어서 스스로 감속한다(진동의 원인이던 부분).
         yaw_err = None
         rate_tgt = None
         corr_x = 0.0
-        if moving and corr_on and yaw is not None and yaw0 is not None:
+        if moving and yaw is not None and yaw0 is not None:
             yaw_err = yaw - yaw0
-            if abs(yaw_err) > CORR_ABORT_DEG:
+            if err_start is None:
+                err_start = abs(yaw_err)
+            # 고정(I) 상태에선 A/D로 돌린 뒤라 시작부터 크게 벌어져 있는 게 정상이다.
+            # 그래서 절대값이 아니라 '시작보다 더 벌어졌는가'로 이상을 판단한다.
+            abort_at = max(CORR_ABORT_DEG, err_start + CORR_ABORT_DEG)
+            if abs(yaw_err) > abort_at:
                 bias = 0.0
                 note = f"!! 방위 {yaw_err:+.0f}° 이탈 — 보정 중단, SPACE 후 다시"
             else:
@@ -230,7 +246,6 @@ def run(stdscr, link, writer, fp, log_path):
                     corr_x *= clamp((CORR_STALE_S + CORR_FADE_S - age) / CORR_FADE_S, 0.0, 1.0)
                     if corr_x == 0.0:
                         note = "텔레메트리 끊김 — 보정 대기"
-                corr_x *= corr_sign
                 if state == "MOVE BACKWARD":
                     # 후진에선 조향 반응이 반대 (자동차 후진 핸들과 동일 원리).
                     # 실측: 전진은 이 부호로 0.5° 유지 성공, 후진은 +30° 폭주 → 반전 필요
@@ -242,7 +257,7 @@ def run(stdscr, link, writer, fp, log_path):
         if now - last_log >= LOG_INTERVAL:
             writer.writerow({
                 "t": round(now - t0, 2), "state": state,
-                "corr_on": int(corr_on), "corr_sign": int(corr_sign),
+                "lock": int(lock_mode),
                 "yaw0": yaw0, "yaw": tel.get("yaw"),
                 "yaw_err": (round(yaw_err, 2) if yaw_err is not None else None),
                 "rate_tgt": (round(rate_tgt, 2) if rate_tgt is not None else None),
@@ -265,9 +280,10 @@ def run(stdscr, link, writer, fp, log_path):
         # 5. 화면 (10Hz)
         if now - last_draw >= DRAW_INTERVAL:
             stdscr.erase()
-            put(stdscr, 0, "직진 유지 — W전진 S후진 A좌 D우 SPACE정지 | C보정 I부호 | E yaw Q종료")
+            put(stdscr, 0, "W 전진   S 후진   A/D 좌우회전   SPACE 정지"
+                           "   I 기준방위각 고정/해제   Q 종료")
             put(stdscr, 2, f"상태: {state}   {note}")
-            corr_txt = f"보정: {'★ ON' if corr_on else 'OFF'} (부호 {'+' if corr_sign > 0 else '-'})"
+            corr_txt = (f"기준: {'★ 고정 ' + fmt(yaw_lock, 1).strip() + '°' if lock_mode else 'W/S 누른 방향'}")
             if ref_pending:
                 corr_txt += "   기준 방위각 잡는 중..."
             elif yaw_err is not None:
@@ -278,9 +294,9 @@ def run(stdscr, link, writer, fp, log_path):
             put(stdscr, 5, f"서보 명령 x={ramp.command_x:5.1f} y={ramp.command_y:5.1f}"
                             f"   에코 x={fmt(tel.get('servo_x'), 5)} y={fmt(tel.get('servo_y'), 5)}")
             yaw_state = ("측정중" if tel.get("yaw_active") else
-                         "캘리브레이션중" if tel.get("yaw_calibrating") else "꺼짐(E로 시작!)")
+                         "캘리브레이션중" if tel.get("yaw_calibrating") else "!! 꺼짐")
             put(stdscr, 7, f"IMU yaw: {fmt(tel.get('yaw'))}°  [{yaw_state}]"
-                            f"   이동시작 0점: {fmt(yaw0)}")
+                            f"   맞추는 방위각: {fmt(yaw0)}")
             put(stdscr, 9, f"전방(cm): {fmt(tel.get('front'))}  (자동정지 {FRONT_STOP_CM:.0f}cm"
                             f" — 센서 전원 꺼져있으면 무력!)")
             put(stdscr, 10, f"우측(cm): 앞 {fmt(tel.get('right_front'))}"
