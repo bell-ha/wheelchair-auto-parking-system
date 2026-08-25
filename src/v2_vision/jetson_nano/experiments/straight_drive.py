@@ -224,8 +224,12 @@ def run(stdscr, link, writer, fp, log_path):
             # 그래서 절대값이 아니라 '시작보다 더 벌어졌는가'로 이상을 판단한다.
             abort_at = max(CORR_ABORT_DEG, err_start + CORR_ABORT_DEG)
             if abs(yaw_err) > abort_at:
-                bias = 0.0
-                note = f"!! 방위 {yaw_err:+.0f}° 이탈 — 보정 중단, SPACE 후 다시"
+                # 보정을 놓기만 하면 휠체어는 비뚤어진 채로 계속 간다(110532에서 12초간
+                # 78°까지). 이만큼 벗어났다는 건 뭔가 잘못됐다는 뜻이므로 세운다.
+                state, moving = "STOP", False
+                yaw0, ref_pending, bias, err_start = None, False, 0.0, None
+                base_x, base_y = servo_preset(state)
+                note = f"!! 방위 {yaw_err:+.0f}° 벗어나 자동 정지 — 다시 W/S"
             else:
                 # 데드밴드 안이면 '되돌리기'는 쉬고 회전속도만 0으로 눌러둔다
                 want = 0.0 if abs(yaw_err) <= CORR_DEADBAND_DEG else -yaw_err / CORR_TAU
@@ -246,10 +250,11 @@ def run(stdscr, link, writer, fp, log_path):
                     corr_x *= clamp((CORR_STALE_S + CORR_FADE_S - age) / CORR_FADE_S, 0.0, 1.0)
                     if corr_x == 0.0:
                         note = "텔레메트리 끊김 — 보정 대기"
-                if state == "MOVE BACKWARD":
-                    # 후진에선 조향 반응이 반대 (자동차 후진 핸들과 동일 원리).
-                    # 실측: 전진은 이 부호로 0.5° 유지 성공, 후진은 +30° 폭주 → 반전 필요
-                    corr_x = -corr_x
+                # 후진 부호 반전은 넣지 않는다. 전 로그를 훑어 서보 편향 방향과 실제
+                # yaw 변화를 대조한 결과 전진/후진 모두 X+(좌) → yaw 증가로 동일했다
+                # (후진 +11.2° 편향에 +14.2°/s). 예전에 반전을 넣었던 건 그때 전역
+                # 부호가 반대였기 때문이고, 전역 부호를 고친 뒤에도 남겨둬서 후진만
+                # 이중으로 뒤집혀 있었다 — 110532 로그의 폭주 원인.
         ramp.set_target(clamp(base_x + corr_x), base_y)
         ramp.tick()
 
