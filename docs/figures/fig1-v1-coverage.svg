@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 600" width="1020" height="600" font-family="-apple-system,'Helvetica Neue',Arial,'Apple SD Gothic Neo','Malgun Gothic',sans-serif">
+<rect width="1020" height="600" fill="#ffffff"/>
+<defs><pattern id="hx" width="9" height="9" patternTransform="rotate(45)" patternUnits="userSpaceOnUse"><line x1="0" y1="0" x2="0" y2="9" stroke="#d6d6d6" stroke-width="1.5"/></pattern>
+<clipPath id="fld"><rect x="60" y="80" width="900" height="392" rx="4"/></clipPath></defs>
+<rect x="60" y="80" width="900" height="392" rx="4" fill="url(#hx)" stroke="#cccccc"/>
+<g clip-path="url(#fld)">
+<path d="M706.0,232.0 L804.9,536.3 A320.0,320.0 0 0 1 555.8,-50.5 Z" fill="#ffffff" stroke="#a8a8a8" stroke-width="1.1"/>
+<path d="M776.0,344.0 L1059.9,368.8 A285.0,285.0 0 0 1 492.1,368.8 Z" fill="#ffffff" stroke="#a8a8a8" stroke-width="1.1"/>
+</g>
+<rect x="706" y="104" width="140" height="212" rx="10" fill="#f0f0f0" stroke="#1a1a1a" stroke-width="1.6"/>
+<text x="748" y="204" font-size="13" fill="#444" font-weight="600">기아 레이</text>
+<text x="763" y="224" font-size="11" fill="#aaa" font-weight="400">앞 ↑</text>
+<rect x="706" y="316" width="140" height="28" fill="#dadada" stroke="#1a1a1a" stroke-width="1.2"/>
+<text x="736" y="335" font-size="11" fill="#555" font-weight="400">트렁크 · 경사로</text>
+<circle cx="706" cy="232" r="7" fill="#1a1a1a"/>
+<circle cx="776" cy="344" r="7" fill="#1a1a1a"/>
+<text x="641" y="228" font-size="12" fill="#1a1a1a" font-weight="600">Left Cam</text>
+<text x="590" y="245" font-size="11.5" fill="#777" font-weight="400">105 cm · 170° 어안</text>
+<text x="709" y="368" font-size="12" fill="#1a1a1a" font-weight="600">Rear Cam</text>
+<text x="658" y="385" font-size="11.5" fill="#777" font-weight="400">110 cm · 170° 어안</text>
+<text x="187" y="130" font-size="13" fill="#666" font-weight="400">카메라가 닿지 않거나</text>
+<text x="172" y="150" font-size="13" fill="#666" font-weight="400">마커가 너무 작아지는 구간</text>
+<text x="213" y="180" font-size="17" fill="#333" font-weight="700">판독 불가</text>
+<text x="535" y="116" font-size="12.5" fill="#8c8c8c" font-weight="600">커버리지</text>
+<path d="M150,300 C260,300 340,314 430,330" fill="none" stroke="#1a1a1a" stroke-width="2.2" stroke-dasharray="7 5"/>
+<path d="M430,330 C550,352 660,392 748,418" fill="none" stroke="#1a1a1a" stroke-width="2.2"/>
+<polygon points="762,424 744,412 742,428" fill="#1a1a1a"/>
+<rect x="135" y="285" width="30" height="30" rx="3" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.8"/>
+<rect x="143" y="293" width="13" height="13" fill="#1a1a1a"/>
+<rect x="415" y="315" width="30" height="30" rx="3" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.8"/>
+<rect x="423" y="323" width="13" height="13" fill="#1a1a1a"/>
+<rect x="761" y="415" width="30" height="30" rx="3" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.8"/>
+<rect x="769" y="423" width="13" height="13" fill="#1a1a1a"/>
+<text x="137" y="272" font-size="12.5" fill="#1a1a1a" font-weight="600">출발</text>
+<text x="380" y="302" font-size="12" fill="#555" font-weight="400">여기서부터 보인다</text>
+<text x="229" y="352" font-size="12" fill="#8a8a8a" font-weight="400">점선 = 위치를 모르는 구간</text>
+<text x="726" y="464" font-size="12.5" fill="#1a1a1a" font-weight="600">목표 — 경사로 앞</text>
+<line x1="60" y1="500" x2="960" y2="500" stroke="#dcdcdc"/>
+<text x="60" y="526" font-size="12.5" fill="#333" font-weight="400">어라운드뷰는 <tspan font-weight="600">차량 바로 주변</tspan>을 보라고 달린 장치다. 휠체어는 그 밖에서 출발한다.</text>
+<text x="60" y="548" font-size="12.5" fill="#333" font-weight="400">캘리브레이션은 왜곡을 펴는 것이지, <tspan font-weight="600">찍히지 않은 곳을 보이게 하지 못한다.</tspan></text>
+<text x="303" y="582" font-size="13" fill="#1a1a1a" font-weight="400">Fig. 2   V1 커버리지 개념도 — 카메라를 차량에 두면 먼 구간이 남는다</text>
+</svg>
