@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 660" width="1020" height="660" font-family="-apple-system,'Helvetica Neue',Arial,'Apple SD Gothic Neo','Malgun Gothic',sans-serif">
+<rect width="1020" height="660" fill="#ffffff"/>
+<rect x="418" y="110" width="150" height="244" rx="10" fill="#f1f1f1" stroke="#1a1a1a" stroke-width="1.6"/>
+<text x="462" y="228" font-size="14" fill="#555" font-weight="600">기아 레이</text>
+<text x="479" y="250" font-size="12" fill="#aaa" font-weight="400">앞 ↑</text>
+<rect x="418" y="354" width="150" height="30" fill="#d9d9d9" stroke="#1a1a1a" stroke-width="1.2"/>
+<text x="450" y="374" font-size="12" fill="#555" font-weight="400">트렁크 · 경사로</text>
+<circle cx="418" cy="144" r="7" fill="#ffffff" stroke="#1a1a1a" stroke-width="2.2"/>
+<circle cx="434" cy="346" r="7" fill="#ffffff" stroke="#1a1a1a" stroke-width="2.2"/>
+<circle cx="493" cy="388" r="7" fill="#ffffff" stroke="#1a1a1a" stroke-width="2.2"/>
+<text x="341" y="148" font-size="12.5" fill="#666" font-weight="400">사이드미러</text>
+<text x="452" y="350" font-size="12.5" fill="#666" font-weight="400">후미등</text>
+<text x="509" y="392" font-size="12.5" fill="#666" font-weight="400">번호판</text>
+<path d="M268,190 L268,278" stroke="#1a1a1a" stroke-width="2" fill="none"/>
+<polygon points="268,286 262,272 274,272" fill="#1a1a1a"/>
+<path d="M280,316 C300,346 312,368 322,378" stroke="#1a1a1a" stroke-width="2" fill="none"/>
+<polygon points="328,384 314,378 320,368" fill="#1a1a1a"/>
+<path d="M348,402 C400,438 450,468 478,486" stroke="#1a1a1a" stroke-width="2" fill="none"/>
+<polygon points="486,492 470,488 476,478" fill="#1a1a1a"/>
+<line x1="408" y1="448" x2="598" y2="448" stroke="#c8c8c8" stroke-width="1" stroke-dasharray="2 5"/>
+<text x="606" y="453" font-size="12.5" fill="#777" font-weight="400">0.8 m</text>
+<line x1="408" y1="544" x2="598" y2="544" stroke="#c8c8c8" stroke-width="1" stroke-dasharray="2 5"/>
+<text x="606" y="549" font-size="12.5" fill="#777" font-weight="400">2.0 m</text>
+<path d="M477,512 C447,522 447,530 477,536" stroke="#1a1a1a" stroke-width="2" fill="none"/>
+<polygon points="479,542 467,532 479,528" fill="#1a1a1a"/>
+<path d="M509,536 C549,530 549,466 509,458" stroke="#1a1a1a" stroke-width="2" fill="none"/>
+<polygon points="507,452 519,462 507,466" fill="#1a1a1a"/>
+<circle cx="268" cy="168" r="15" fill="#1a1a1a" stroke="#1a1a1a" stroke-width="1.8"/>
+<text x="257" y="173" font-size="13" fill="#ffffff" font-weight="700">1·2</text>
+<circle cx="268" cy="300" r="15" fill="#1a1a1a" stroke="#1a1a1a" stroke-width="1.8"/>
+<text x="257" y="305" font-size="13" fill="#ffffff" font-weight="700">3·4</text>
+<circle cx="330" cy="392" r="15" fill="#1a1a1a" stroke="#1a1a1a" stroke-width="1.8"/>
+<text x="326" y="397" font-size="13" fill="#ffffff" font-weight="700">5</text>
+<circle cx="493" cy="504" r="15" fill="#1a1a1a" stroke="#1a1a1a" stroke-width="1.8"/>
+<text x="482" y="509" font-size="13" fill="#ffffff" font-weight="700">6·7</text>
+<circle cx="493" cy="544" r="15" fill="#1a1a1a" stroke="#1a1a1a" stroke-width="1.8"/>
+<text x="489" y="549" font-size="13" fill="#ffffff" font-weight="700">8</text>
+<circle cx="493" cy="448" r="15" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.8"/>
+<text x="489" y="453" font-size="13" fill="#1a1a1a" font-weight="700">9</text>
+<text x="219" y="173" font-size="12.5" fill="#666" font-weight="400">시작</text>
+<text x="413" y="453" font-size="12.5" fill="#1a1a1a" font-weight="700">도킹 완료</text>
+<text x="371" y="549" font-size="12.5" fill="#666" font-weight="400">물러난다</text>
+<text x="519" y="509" font-size="12.5" fill="#666" font-weight="400">정렬 · 정면 회전</text>
+<text x="690" y="120" font-size="14" fill="#333" font-weight="700">단계와 근거 센서</text>
+<circle cx="700" cy="152" r="12" fill="#1a1a1a"/>
+<text x="696" y="157" font-size="12" fill="#ffffff" font-weight="700">1</text>
+<text x="720" y="156" font-size="13.5" fill="#1a1a1a" font-weight="400">IBVS 초기 정렬</text>
+<text x="720" y="172" font-size="12" fill="#8a8a8a" font-weight="400">사이드미러</text>
+<circle cx="700" cy="190" r="12" fill="#1a1a1a"/>
+<text x="696" y="195" font-size="12" fill="#ffffff" font-weight="700">2</text>
+<text x="720" y="194" font-size="13.5" fill="#1a1a1a" font-weight="400">초음파로 평행 맞춤</text>
+<text x="720" y="210" font-size="12" fill="#8a8a8a" font-weight="400">좌측 초음파</text>
+<circle cx="700" cy="228" r="12" fill="#1a1a1a"/>
+<text x="696" y="233" font-size="12" fill="#ffffff" font-weight="700">3</text>
+<text x="720" y="232" font-size="13.5" fill="#1a1a1a" font-weight="400">번호판 보일 때까지 후진</text>
+<text x="720" y="248" font-size="12" fill="#8a8a8a" font-weight="400">카메라</text>
+<circle cx="700" cy="266" r="12" fill="#1a1a1a"/>
+<text x="696" y="271" font-size="12" fill="#ffffff" font-weight="700">4</text>
+<text x="720" y="270" font-size="13.5" fill="#1a1a1a" font-weight="400">IMU로 70° 회전</text>
+<text x="720" y="286" font-size="12" fill="#8a8a8a" font-weight="400">IMU</text>
+<circle cx="700" cy="304" r="12" fill="#1a1a1a"/>
+<text x="696" y="309" font-size="12" fill="#ffffff" font-weight="700">5</text>
+<text x="720" y="308" font-size="13.5" fill="#1a1a1a" font-weight="400">좌측 초음파 2개 잡힐 때까지 직진</text>
+<text x="720" y="324" font-size="12" fill="#8a8a8a" font-weight="400">초음파 ×2</text>
+<circle cx="700" cy="342" r="12" fill="#1a1a1a"/>
+<text x="696" y="347" font-size="12" fill="#ffffff" font-weight="700">6</text>
+<text x="720" y="346" font-size="13.5" fill="#1a1a1a" font-weight="400">IBVS 후방 정렬</text>
+<text x="720" y="362" font-size="12" fill="#8a8a8a" font-weight="400">후미등</text>
+<circle cx="700" cy="380" r="12" fill="#1a1a1a"/>
+<text x="696" y="385" font-size="12" fill="#ffffff" font-weight="700">7</text>
+<text x="720" y="384" font-size="13.5" fill="#1a1a1a" font-weight="400">IMU로 정면 회전</text>
+<text x="720" y="400" font-size="12" fill="#8a8a8a" font-weight="400">IMU</text>
+<circle cx="700" cy="418" r="12" fill="#1a1a1a"/>
+<text x="696" y="423" font-size="12" fill="#ffffff" font-weight="700">8</text>
+<text x="720" y="422" font-size="13.5" fill="#1a1a1a" font-weight="400">2 m 간격까지 후진</text>
+<text x="720" y="438" font-size="12" fill="#8a8a8a" font-weight="400">전방 초음파</text>
+<circle cx="700" cy="456" r="12" fill="#1a1a1a"/>
+<text x="696" y="461" font-size="12" fill="#ffffff" font-weight="700">9</text>
+<text x="720" y="460" font-size="13.5" fill="#1a1a1a" font-weight="400">경사로 사출 후 0.8 m까지 전진</text>
+<text x="720" y="476" font-size="12" fill="#8a8a8a" font-weight="400">전방 초음파</text>
+<text x="690" y="532" font-size="12.5" fill="#444" font-weight="600">4단계가 90°가 아니라 70°인 이유 —</text>
+<text x="690" y="550" font-size="12.5" fill="#666" font-weight="400">90°로 돌면 차량 후면 특징점이 시야에서</text>
+<text x="690" y="568" font-size="12.5" fill="#666" font-weight="400">사라진다. 대각선으로 이동해 유지한다.</text>
+<line x1="60" y1="596" x2="960" y2="596" stroke="#dcdcdc"/>
+<text x="60" y="622" font-size="13.5" fill="#333" font-weight="400">휠체어는 좌우로 이동할 수 없다. <tspan font-weight="600">직·후진과 회전만으로</tspan> 목표 자세에 도달해야 한다.</text>
+<text x="303" y="650" font-size="14" fill="#1a1a1a" font-weight="400">Fig. 3   9단계 주차 시나리오 — 출차는 이 순서를 뒤집은 7단계다</text>
+</svg>
