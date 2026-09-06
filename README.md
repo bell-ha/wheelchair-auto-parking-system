@@ -106,6 +106,13 @@ w* = argmin ‖Xw − y‖² + λ‖w‖²             v 마커가 카메라를 
 
 **8단계 파이프라인 중 7단계가 실기체에서 동작했다.** 캘리브레이션 → 탑뷰 합성 → 위치추정 → A\* 경로계획 → CAN 제어까지 이어졌다.
 
+<div align="center">
+<a href="https://youtu.be/o30saxUv7JM">
+<img src="https://img.youtube.com/vi/o30saxUv7JM/maxresdefault.jpg" width="620"/>
+</a>
+<br><sub>V1 실기체 테스트 — 어안 2뷰(좌 · 후방)로 마커를 추적하고 탑뷰 맵에 위치를 찍는다 &nbsp;·&nbsp; 이미지를 누르면 영상이 열린다</sub>
+</div>
+
 ### 막힌 곳은 튜닝이 아니었다
 
 <div align="center">
