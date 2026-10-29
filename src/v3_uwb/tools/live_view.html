@@ -1,0 +1,674 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UWB 실시간 보기</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7;
+    --surface: #fcfcfb;
+    --ink-1: #0b0b0b;
+    --ink-2: #52514e;
+    --ink-3: #898781;
+    --grid: #e1e0d9;
+    --axis: #c3c2b7;
+    --border: rgba(11, 11, 11, 0.10);
+    --wash: rgba(11, 11, 11, 0.04);
+    --series: #2a78d6;
+    --series-wash: rgba(42, 120, 214, 0.10);
+    --good: #0ca30c;
+    --warning: #fab219;
+    --critical: #d03b3b;
+    --accent: #2a78d6;
+    --accent-ink: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --page: #0d0d0d;
+      --surface: #1a1a19;
+      --ink-1: #f0efec;
+      --ink-2: #c3c2b7;
+      --ink-3: #898781;
+      --grid: #2c2c2a;
+      --axis: #383835;
+      --border: rgba(255, 255, 255, 0.10);
+      --wash: rgba(255, 255, 255, 0.05);
+      --series: #3987e5;
+      --series-wash: rgba(57, 135, 229, 0.12);
+      --accent: #3987e5;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink-1: #f0efec;
+    --ink-2: #c3c2b7;
+    --ink-3: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --wash: rgba(255, 255, 255, 0.05);
+    --series: #3987e5;
+    --series-wash: rgba(57, 135, 229, 0.12);
+    --accent: #3987e5;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--ink-1);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "Apple SD Gothic Neo", sans-serif;
+  }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 24px 16px 48px; }
+
+  .top { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0; }
+  .sub { margin: 4px 0 0; color: var(--ink-2); }
+  .status { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: 13px; white-space: nowrap; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); flex: none; }
+  .dot.good { background: var(--good); }
+  .dot.warning { background: var(--warning); }
+  .dot.critical { background: var(--critical); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 560px), 1fr)); gap: 16px; }
+  .empty { color: var(--ink-2); background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; }
+  .empty code { font-size: 13px; }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; min-width: 0; }
+  .card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 12px; }
+  .card-head h2 { font-size: 18px; font-weight: 600; margin: 0; letter-spacing: 0.02em; }
+  .badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--wash); color: var(--ink-2); border: 1px solid var(--border); }
+  .port { color: var(--ink-3); font-size: 12px; overflow-wrap: anywhere; }
+  .head-spacer { flex: 1; }
+
+  button {
+    font: inherit; font-size: 13px; cursor: pointer; border-radius: 8px; padding: 6px 12px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--ink-1);
+  }
+  button:hover { background: var(--wash); }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+  button.primary:hover { filter: brightness(1.08); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  input {
+    font: inherit; font-size: 13px; padding: 5px 8px; border-radius: 8px; width: 88px;
+    border: 1px solid var(--border); background: var(--page); color: var(--ink-1);
+  }
+  input.wide { width: 120px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .hero-row { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; }
+  .hero-value { font-size: 52px; font-weight: 600; line-height: 1; letter-spacing: -0.02em; }
+  .hero-value .unit { font-size: 20px; font-weight: 500; color: var(--ink-2); margin-left: 4px; letter-spacing: 0; }
+  .hero-label { color: var(--ink-2); font-size: 13px; margin-top: 6px; }
+  .truth { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--ink-2); font-size: 13px; }
+  .truth .err { color: var(--ink-1); font-weight: 600; min-width: 96px; }
+
+  .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 16px 0 4px; }
+  @media (max-width: 520px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .tile { background: var(--page); border-radius: 8px; padding: 8px 10px; min-width: 0; }
+  .tile-label { color: var(--ink-2); font-size: 12px; }
+  .tile-value { font-size: 18px; font-weight: 600; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tile-sub { color: var(--ink-3); font-size: 12px; }
+  .meta { color: var(--ink-3); font-size: 12px; margin: 6px 0 0; }
+
+  .chart { position: relative; margin-top: 14px; }
+  .chart-title { font-size: 13px; color: var(--ink-2); margin-bottom: 4px; }
+  .chart canvas { display: block; width: 100%; height: 190px; border-radius: 6px; }
+  .key { display: flex; flex-wrap: wrap; gap: 14px; color: var(--ink-2); font-size: 12px; margin-top: 4px; }
+  .key span { display: inline-flex; align-items: center; gap: 6px; }
+  .key .line-key { width: 16px; height: 2px; border-radius: 1px; background: var(--series); }
+  .key .ref-key { width: 16px; height: 1px; background: var(--ink-2); }
+  .key .x-key { color: var(--critical); font-weight: 700; }
+  .tooltip {
+    position: absolute; pointer-events: none; display: none; z-index: 2;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12); padding: 6px 10px; font-size: 12px; white-space: nowrap;
+  }
+  .tooltip strong { display: block; font-size: 14px; color: var(--ink-1); }
+  .tooltip span { color: var(--ink-2); }
+
+  .record { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 13px; color: var(--ink-2); }
+  .record .progress { flex-basis: 100%; color: var(--ink-1); font-size: 12px; overflow-wrap: anywhere; }
+
+  .message { color: var(--ink-2); background: var(--page); border-radius: 8px; padding: 12px; margin: 0; }
+  .message strong { color: var(--ink-1); }
+
+  details { margin-top: 10px; }
+  summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
+  pre {
+    margin: 6px 0 0; padding: 8px 10px; background: var(--page); border-radius: 8px;
+    font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink-2);
+    max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 3px 6px; border-bottom: 1px solid var(--grid); }
+  th { color: var(--ink-3); font-weight: 500; }
+  th:first-child, td:first-child { text-align: left; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>UWB 실시간 보기</h1>
+      <p class="sub">연결된 보드마다 카드 하나. 새로 꽂으면 2초 안에 생긴다.</p>
+    </div>
+    <span class="status" id="conn"><span class="dot warning"></span><span>서버 연결 중…</span></span>
+  </header>
+
+  <main id="boards" class="grid"></main>
+  <p id="empty" class="empty" hidden>연결된 보드가 없다. USB로 꽂으면 자동으로 나타난다 (CP2104 보드만 찾음).</p>
+</div>
+
+<template id="card-tpl">
+  <article class="card">
+    <header class="card-head">
+      <h2 class="label"></h2>
+      <span class="badge fw"></span>
+      <span class="status"><span class="dot"></span><span class="status-text"></span></span>
+      <span class="head-spacer"></span>
+      <button class="hold" type="button"></button>
+      <span class="port" style="flex-basis:100%"></span>
+    </header>
+
+    <section class="tag-view" hidden>
+      <div class="hero-row">
+        <div>
+          <div class="hero-value"><span class="cur">—</span><span class="unit">m</span></div>
+          <div class="hero-label cur-label">현재 거리</div>
+        </div>
+        <label class="truth">실제 거리 <input class="truth-in" type="number" step="0.01" min="0" placeholder="줄자 값"> m
+          <span class="err"></span></label>
+      </div>
+
+      <div class="tiles">
+        <div class="tile"><div class="tile-label">평균</div><div class="tile-value t-mean">—</div><div class="tile-sub t-sd">최근 성공 50개</div></div>
+        <div class="tile"><div class="tile-label">성공률</div><div class="tile-value t-rate">—</div><div class="tile-sub t-rate-sub">최근 시도 50개</div></div>
+        <div class="tile"><div class="tile-label">측정 속도</div><div class="tile-value t-hz">—</div><div class="tile-sub">최근 5초</div></div>
+        <div class="tile"><div class="tile-label">RX − FP</div><div class="tile-value t-dfp">—</div><div class="tile-sub">작을수록 직진파 위주</div></div>
+      </div>
+      <p class="meta t-meta"></p>
+
+      <div class="chart">
+        <div class="chart-title">거리 · 최근 30초</div>
+        <canvas tabindex="0" aria-label="최근 30초 거리 그래프. 좌우 화살표로 측정값을 하나씩 볼 수 있음"></canvas>
+        <div class="tooltip"><strong></strong><span></span></div>
+        <div class="key">
+          <span><i class="line-key"></i>측정 거리</span>
+          <span><i class="ref-key"></i>실제 거리</span>
+          <span><b class="x-key">×</b>측정 실패</span>
+        </div>
+      </div>
+
+      <div class="record">
+        <span>기록</span>
+        <input class="rec-cond wide" list="conds" value="los" aria-label="조건">
+        <input class="rec-n" type="number" min="1" value="300" aria-label="목표 개수"> 개
+        <button class="rec-btn primary" type="button">기록 시작</button>
+        <span class="progress"></span>
+      </div>
+
+      <details class="table-details">
+        <summary>최근 측정 표</summary>
+        <table>
+          <thead><tr><th>시점</th><th>결과</th><th>거리 (m)</th><th>RX − FP (dB)</th><th>RX (dBm)</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </details>
+    </section>
+
+    <section class="anchor-view" hidden>
+      <div class="hero-value"><span class="replies">—</span><span class="unit">회/초</span></div>
+      <div class="hero-label replies-label">태그의 요청에 응답한 횟수</div>
+    </section>
+
+    <p class="message other-msg" hidden></p>
+
+    <details class="log-details">
+      <summary>원시 로그</summary>
+      <pre class="log"></pre>
+    </details>
+  </article>
+</template>
+
+<datalist id="conds">
+  <option value="los">가림 없음</option>
+  <option value="nlos_car">차체에 가림</option>
+  <option value="nlos_body">사람 몸에 가림</option>
+</datalist>
+
+<script>
+"use strict";
+const WINDOW_S = 30;        // 그래프 시간 폭
+const KEEP_S = 90;          // 메모리에 남길 기간
+const STAT_N = 50;          // 평균·성공률 계산 개수
+
+const FW_NAME = { tag: "태그", anchor: "앵커", factory: "공장 테스트 펌웨어", unknown: "펌웨어 확인 중" };
+const STATUS = {
+  live: ["good", "실시간"], connecting: ["warning", "연결 중"], error: ["critical", "오류"],
+  released: ["", "포트 놓음"], unplugged: ["", "뽑힘"],
+};
+
+const boards = new Map();   // port → {el, state, samples, anchor, logLines, ...}
+const $ = (root, sel) => root.querySelector(sel);
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const fmt = (v, d) => (v == null || Number.isNaN(v) ? "—" : v.toFixed(d));
+
+// ---------------- 서버 이벤트 ----------------
+function connect() {
+  const es = new EventSource("/events");
+  es.onopen = () => setConn("good", "서버 연결됨");
+  es.onerror = () => setConn("critical", "서버 끊김 — 터미널에서 live_view.py가 돌고 있는지 확인");
+  es.onmessage = e => handle(JSON.parse(e.data));
+}
+function setConn(kind, text) {
+  const c = document.getElementById("conn");
+  $(c, ".dot").className = "dot " + kind;
+  $(c, "span:last-child").textContent = text;
+}
+
+function handle(ev) {
+  if (ev.type === "snapshot") {
+    for (const b of ev.boards) upsert(b);
+  } else if (ev.type === "board") {
+    upsert(ev);
+  } else if (ev.type === "sample") {
+    const b = boards.get(ev.port); if (!b) return;
+    b.samples.push(ev);
+    const cut = Date.now() / 1000 - KEEP_S;
+    while (b.samples.length && b.samples[0].t < cut) b.samples.shift();
+    b.dirty = true;
+  } else if (ev.type === "anchor") {
+    const b = boards.get(ev.port); if (!b) return;
+    b.anchor = ev; b.dirty = true;
+  } else if (ev.type === "log") {
+    const b = boards.get(ev.port); if (!b) return;
+    b.logLines.push(ev.line);
+    if (b.logLines.length > 40) b.logLines.shift();
+    b.logDirty = true;
+    if (b.state.firmware === "unknown") renderHead(b);   // 안내 문구가 로그 내용에 따라 달라짐
+  } else if (ev.type === "record") {
+    const b = boards.get(ev.port); if (!b) return;
+    b.state.record = ev; renderRecord(b);
+  } else if (ev.type === "record_done") {
+    const b = boards.get(ev.port); if (!b) return;
+    b.lastSaved = ev;
+  }
+}
+
+function upsert(st) {
+  let b = boards.get(st.port);
+  if (!b) {
+    b = { state: st, samples: [], anchor: null, logLines: [], hover: null, dirty: true, logDirty: true };
+    b.el = buildCard(b);
+    boards.set(st.port, b);
+    const list = document.getElementById("boards");
+    list.appendChild(b.el);
+    [...list.children].sort((x, y) => x.dataset.label.localeCompare(y.dataset.label)).forEach(n => list.appendChild(n));
+  }
+  if (st.firmware !== b.state.firmware && st.firmware !== "tag") b.samples = [];
+  b.state = st;
+  b.logLines = st.log.slice();
+  b.logDirty = true;
+  renderHead(b);
+  renderRecord(b);
+  document.getElementById("empty").hidden = boards.size > 0;
+}
+
+// ---------------- 카드 ----------------
+function buildCard(b) {
+  const el = document.getElementById("card-tpl").content.firstElementChild.cloneNode(true);
+  el.dataset.label = b.state.label;
+  $(el, ".hold").addEventListener("click", () =>
+    post(b.state.status === "released" ? "/api/attach" : "/api/release", { port: b.state.port }));
+  $(el, ".truth-in").addEventListener("input", () => { b.dirty = true; });
+  $(el, ".rec-btn").addEventListener("click", () => toggleRecord(b));
+
+  const cv = $(el, "canvas");
+  cv.addEventListener("pointermove", e => {
+    const r = cv.getBoundingClientRect();
+    b.hover = { x: e.clientX - r.left, idx: null }; b.dirty = true;
+  });
+  cv.addEventListener("pointerleave", () => { b.hover = null; b.dirty = true; });
+  cv.addEventListener("blur", () => { b.hover = null; b.dirty = true; });
+  cv.addEventListener("keydown", e => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    const vis = visibleSamples(b);
+    if (!vis.length) return;
+    let i = b.hover && b.hover.idx != null ? b.hover.idx : vis.length;
+    i = Math.max(0, Math.min(vis.length - 1, i + (e.key === "ArrowLeft" ? -1 : 1)));
+    b.hover = { idx: i, x: null }; b.dirty = true;
+  });
+  return el;
+}
+
+function renderHead(b) {
+  const { el, state: st } = b;
+  el.dataset.label = st.label;
+  $(el, ".label").textContent = st.label;
+  $(el, ".fw").textContent = FW_NAME[st.firmware] || st.firmware;
+  $(el, ".port").textContent = st.port + (st.sn && st.sn !== "?" ? "  ·  고유번호 " + st.sn : "");
+  const [kind, text] = STATUS[st.status] || ["", st.status];
+  $(el, ".status .dot").className = "dot " + kind;
+  $(el, ".status-text").textContent = text;
+  $(el, ".hold").textContent = st.status === "released" ? "다시 잡기" : "포트 놓기";
+  $(el, ".hold").title = st.status === "released" ? "" : "펌웨어 업로드 전에 누른다";
+
+  const live = st.status === "live";
+  $(el, ".tag-view").hidden = !(live && st.firmware === "tag");
+  $(el, ".anchor-view").hidden = !(live && st.firmware === "anchor");
+
+  const msg = $(el, ".other-msg");
+  let m = null;
+  if (st.status === "error") {
+    m = ["연결 문제: " + st.error,
+      "보드를 뽑았다 다시 꽂는다 — 맥의 CP2104 드라이버가 멈추는 경우가 많았다. Arduino 시리얼 모니터가 열려 있으면 닫는다."];
+  } else if (st.status === "released") {
+    m = ["포트를 놓았음.", "지금 펌웨어를 업로드할 수 있다. 끝나면 '다시 잡기'."];
+  } else if (st.status === "unplugged" && st.firmware === "anchor") {
+    // 앵커는 맥과 데이터를 주고받을 필요가 없다 — 충전기·보조배터리로 옮긴 경우가 이것 (2026-10-29)
+    m = ["맥에서 안 보임 (앵커는 전원만 있으면 동작).",
+      "충전기·보조배터리에 꽂혀 있다면 정상이다. 태그 카드에 거리가 나오면 앵커가 응답하고 있는 것. 다시 맥에 꽂으면 이 카드로 이어진다."];
+  } else if (st.status === "unplugged") {
+    m = ["보드가 뽑혔음.", "다시 꽂으면 이 카드로 이어진다."];
+  } else if (st.status === "connecting") {
+    m = ["연결 중…", "보드를 재부팅시켜 부팅 메시지를 기다리는 중."];
+  } else if (st.firmware === "factory") {
+    m = ["공장 테스트 펌웨어가 돌고 있음.", "firmware/uwb_tag 또는 uwb_anchor를 올리면 거리가 보인다 ('포트 놓기' 후 업로드)."];
+  } else if (st.firmware === "unknown") {
+    const lastLine = b.logLines[b.logLines.length - 1] || "";
+    if (lastLine.startsWith("entry 0x")) {
+      // ESP32 ROM 로그의 마지막 줄 = 프로그램 시작. 그 뒤로 아무 출력이 없는 상태 (2026-10-29 DFBB에서 겪음)
+      m = ["부팅은 됐는데 그 뒤로 출력이 없음.",
+        "출력이 없는 공장 펌웨어이거나 DW3000 초기화에서 멈춘 것. '포트 놓기' 후 firmware/uwb_anchor나 uwb_tag를 올리면 구분된다."];
+    } else if (b.logLines.length) {
+      m = ["알 수 없는 펌웨어.", "원시 로그를 보고 판단한다."];
+    } else {
+      m = ["부팅 메시지를 기다리는 중.", "몇 초 넘게 이대로면 보드의 RST 버튼을 눌러 본다."];
+    }
+  }
+  msg.hidden = !m;
+  if (m) {
+    msg.replaceChildren();
+    const s = document.createElement("strong"); s.textContent = m[0];
+    msg.append(s, document.createElement("br"), document.createTextNode(m[1]));
+  }
+  // 공장·미확인 펌웨어는 로그밖에 볼 게 없으니 펼쳐 둔다. 그 외에는 사용자가 연 상태를 건드리지 않음
+  if (st.status === "live" && (st.firmware === "factory" || st.firmware === "unknown")) $(el, ".log-details").open = true;
+}
+
+function renderRecord(b) {
+  const { el, state: st } = b;
+  const rec = st.record;
+  const btn = $(el, ".rec-btn");
+  btn.textContent = rec ? "기록 정지" : "기록 시작";
+  btn.classList.toggle("primary", !rec);
+  $(el, ".rec-cond").disabled = $(el, ".rec-n").disabled = !!rec;
+  const p = $(el, ".progress");
+  if (rec) {
+    p.textContent = `기록 중 ${rec.n_ok}/${rec.target} (시도 ${rec.n_all}) → ${rec.path}`;
+  } else if (b.lastSaved) {
+    const s = b.lastSaved;
+    const why = { done: "완료", stopped: "정지", released: "포트 놓음", unplugged: "뽑힘", error: "오류" }[s.reason] || s.reason;
+    p.textContent = `저장됨 (${why}): ${s.path} · 성공 ${s.n_ok} / 시도 ${s.n_all}`;
+  } else {
+    p.textContent = "실제 거리를 적고 시작하면 log_range.py와 같은 CSV가 data/range/에 쌓인다.";
+  }
+}
+
+async function toggleRecord(b) {
+  if (b.state.record) return post("/api/record/stop", { port: b.state.port });
+  const truth = $(b.el, ".truth-in").value;
+  await post("/api/record/start", {
+    port: b.state.port, true_m: truth === "" ? null : Number(truth),
+    cond: $(b.el, ".rec-cond").value || "los", target: Number($(b.el, ".rec-n").value) || 300,
+  });
+}
+
+async function post(path, body) {
+  try {
+    const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-UWB": "1" }, body: JSON.stringify(body) });
+    const j = await r.json();
+    if (!r.ok) alert(j.error || "요청 실패");
+    else upsert(j);
+  } catch (e) {
+    alert("서버에 요청하지 못함: " + e);
+  }
+}
+
+// ---------------- 통계 ----------------
+function stats(b) {
+  const s = b.samples;
+  const last = s.slice(-STAT_N);
+  const okDist = s.filter(x => x.ok).slice(-STAT_N).map(x => x.dist_m);
+  const mean = okDist.length ? okDist.reduce((a, v) => a + v, 0) / okDist.length : null;
+  const sd = okDist.length > 1 ? Math.sqrt(okDist.reduce((a, v) => a + (v - mean) ** 2, 0) / okDist.length) : null;
+  const dfps = s.filter(x => x.ok && x.dfp != null).slice(-STAT_N).map(x => x.dfp);
+  const now = Date.now() / 1000;
+  const lastOk = [...s].reverse().find(x => x.ok);
+  return {
+    mean, sd, nOk: okDist.length,
+    rate: last.length ? last.filter(x => x.ok).length / last.length : null, nTry: last.length,
+    hz: s.filter(x => x.t > now - 5).length / 5,
+    dfp: dfps.length ? dfps.reduce((a, v) => a + v, 0) / dfps.length : null,
+    lastOk, last: s[s.length - 1],
+  };
+}
+
+function renderTag(b) {
+  const el = b.el, st = stats(b);
+  const now = Date.now() / 1000;
+  const stale = !st.last || now - st.last.t > 2;
+
+  $(el, ".cur").textContent = st.lastOk ? st.lastOk.dist_m.toFixed(3) : "—";
+  $(el, ".cur-label").textContent = stale
+    ? "새 측정 없음 — 태그가 멈췄거나 연결 확인"
+    : (st.last.ok ? "현재 거리" : `마지막 성공값 · 방금 실패 (${st.last.reason})`);
+
+  const truth = parseFloat($(el, ".truth-in").value);
+  $(el, ".err").textContent = !Number.isNaN(truth) && st.mean != null
+    ? `평균 오차 ${(st.mean - truth >= 0 ? "+" : "")}${((st.mean - truth) * 100).toFixed(1)} cm` : "";
+
+  $(el, ".t-mean").textContent = st.mean == null ? "—" : `${st.mean.toFixed(3)} m`;
+  $(el, ".t-sd").textContent = st.sd == null ? `최근 성공 ${st.nOk || 50}개`
+    : `± ${(st.sd * 100).toFixed(1)} cm · 성공 ${st.nOk}개`;
+  $(el, ".t-rate").textContent = st.rate == null ? "—" : `${Math.round(st.rate * 100)}%`;
+  $(el, ".t-rate-sub").textContent = st.nTry ? `최근 시도 ${st.nTry}개` : "최근 시도 50개";
+  $(el, ".t-hz").textContent = `${st.hz.toFixed(1)} Hz`;
+  $(el, ".t-dfp").textContent = st.dfp == null ? "—" : `${st.dfp.toFixed(1)} dB`;
+  const lo = st.lastOk;
+  $(el, ".t-meta").textContent = lo
+    ? `RX ${fmt(lo.rx, 1)} dBm · FP ${fmt(lo.fp, 1)} dBm · 시계 오차 ${fmt(lo.clk_ppm, 2)} ppm · LOS/NLOS 기준값은 실험 1에서 정함`
+    : "";
+
+  drawChart(b, truth);
+  if ($(el, ".table-details").open) renderTable(b);
+}
+
+function renderTable(b) {
+  const tb = $(b.el, "tbody");
+  const now = Date.now() / 1000;
+  const rows = b.samples.slice(-12).reverse().map(s => {
+    const tr = document.createElement("tr");
+    const cells = [`${(now - s.t).toFixed(1)}초 전`, s.ok ? "성공" : `실패 (${s.reason})`,
+      s.ok ? s.dist_m.toFixed(3) : "—", s.ok ? fmt(s.dfp, 1) : "—", s.ok ? fmt(s.rx, 1) : "—"];
+    for (const c of cells) { const td = document.createElement("td"); td.textContent = c; tr.appendChild(td); }
+    return tr;
+  });
+  tb.replaceChildren(...rows);
+}
+
+function renderAnchor(b) {
+  const a = b.anchor, now = Date.now() / 1000;
+  const fresh = a && now - a.t < 3;
+  $(b.el, ".replies").textContent = fresh ? String(a.replies) : "0";
+  $(b.el, ".replies-label").textContent = fresh
+    ? "태그의 요청에 응답한 횟수 (태그가 10 Hz면 약 10)"
+    : "응답 없음 — 태그가 꺼져 있거나, 멀거나, 펌웨어 짝이 안 맞음";
+}
+
+// ---------------- 그래프 ----------------
+function visibleSamples(b) {
+  const t0 = Date.now() / 1000 - WINDOW_S;
+  return b.samples.filter(s => s.t >= t0);
+}
+
+function niceStep(range) {
+  const steps = [0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10];
+  return steps.find(s => range / s <= 5) || 10;
+}
+
+function drawChart(b, truth) {
+  const cv = $(b.el, "canvas");
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (!W || !H) return;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  }
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+
+  const C = { surface: css("--surface"), ink2: css("--ink-2"), ink3: css("--ink-3"), grid: css("--grid"),
+    axis: css("--axis"), series: css("--series"), wash: css("--series-wash"), crit: css("--critical") };
+  const pad = { l: 52, r: 12, t: 10, b: 34 };
+  const pw = W - pad.l - pad.r, ph = H - pad.t - pad.b;
+  const failY = pad.t + ph - 6;           // 실패 표시 줄 (그래프 맨 아래)
+  const now = Date.now() / 1000;
+  const xOf = t => pad.l + (1 - (now - t) / WINDOW_S) * pw;
+
+  const vis = visibleSamples(b);
+  const ok = vis.filter(s => s.ok);
+  const vals = ok.map(s => s.dist_m);
+  if (!Number.isNaN(truth)) vals.push(truth);
+
+  g.font = "11px system-ui, -apple-system, sans-serif";
+  g.textBaseline = "middle";
+
+  // y 범위 — 데이터에 맞춰 늘고 준다
+  let lo, hi;
+  if (vals.length) {
+    lo = Math.min(...vals); hi = Math.max(...vals);
+    const span = Math.max(hi - lo, 0.05);
+    lo -= span * 0.25; hi += span * 0.25;
+  } else { lo = 0; hi = 1; }
+  const step = niceStep(hi - lo);
+  lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
+  const yOf = v => pad.t + (1 - (v - lo) / (hi - lo)) * (ph - 14);   // 아래 14px은 실패 표시 자리
+  const dec = step < 0.01 ? 3 : step < 0.1 ? 2 : 1;
+
+  // 격자 + y 눈금
+  g.lineWidth = 1;
+  g.fillStyle = C.ink3; g.textAlign = "right";
+  for (let v = lo; v <= hi + step / 2; v += step) {
+    const y = Math.round(yOf(v)) + 0.5;
+    g.strokeStyle = C.grid; g.beginPath(); g.moveTo(pad.l, y); g.lineTo(pad.l + pw, y); g.stroke();
+    g.fillText(v.toFixed(dec), pad.l - 8, y);
+  }
+  // x 축 + 눈금
+  g.strokeStyle = C.axis;
+  g.beginPath(); g.moveTo(pad.l, pad.t + ph + 0.5); g.lineTo(pad.l + pw, pad.t + ph + 0.5); g.stroke();
+  g.textAlign = "center"; g.textBaseline = "top"; g.fillStyle = C.ink3;
+  for (const s of [30, 20, 10, 0]) {
+    g.fillText(s === 0 ? "지금" : `${s}초 전`, xOf(now - s), pad.t + ph + 8);
+  }
+  g.textBaseline = "middle";
+
+  // 실제 거리 기준선 — 값은 입력칸·범례에 있으므로 선 위에 글자를 얹지 않음 (측정선과 겹침)
+  if (!Number.isNaN(truth) && truth >= lo && truth <= hi) {
+    const y = Math.round(yOf(truth)) + 0.5;
+    g.strokeStyle = C.ink2; g.beginPath(); g.moveTo(pad.l, y); g.lineTo(pad.l + pw, y); g.stroke();
+  }
+
+  // 거리 선 — 0.6초 넘게 비면 끊는다 (실패 구간을 선으로 메우지 않음)
+  g.save();
+  g.beginPath(); g.rect(pad.l, pad.t, pw, ph); g.clip();
+  g.strokeStyle = C.series; g.lineWidth = 2; g.lineJoin = "round"; g.lineCap = "round";
+  g.beginPath();
+  let prev = null;
+  for (const s of ok) {
+    const x = xOf(s.t), y = yOf(s.dist_m);
+    if (!prev || s.t - prev.t > 0.6) g.moveTo(x, y); else g.lineTo(x, y);
+    prev = s;
+  }
+  g.stroke();
+  // 끝점
+  if (ok.length) {
+    const e = ok[ok.length - 1];
+    dot(g, xOf(e.t), yOf(e.dist_m), C.series, C.surface);
+  }
+  g.restore();
+
+  // 실패 표시
+  g.strokeStyle = C.crit; g.lineWidth = 1.5;
+  for (const s of vis) {
+    if (s.ok) continue;
+    const x = xOf(s.t);
+    g.beginPath(); g.moveTo(x - 3, failY - 3); g.lineTo(x + 3, failY + 3);
+    g.moveTo(x + 3, failY - 3); g.lineTo(x - 3, failY + 3); g.stroke();
+  }
+
+  // 십자선 + 툴팁
+  const tip = $(b.el, ".tooltip");
+  let h = null;
+  if (b.hover && vis.length) {
+    if (b.hover.x != null) {
+      const tAt = now - (1 - (b.hover.x - pad.l) / pw) * WINDOW_S;
+      let best = 0;
+      vis.forEach((s, i) => { if (Math.abs(s.t - tAt) < Math.abs(vis[best].t - tAt)) best = i; });
+      h = vis[best];
+    } else if (b.hover.idx != null) {
+      b.hover.idx = Math.min(b.hover.idx, vis.length - 1);
+      h = vis[b.hover.idx];
+    }
+  }
+  if (h) {
+    const x = Math.round(xOf(h.t)) + 0.5;
+    g.strokeStyle = C.axis; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(x, pad.t); g.lineTo(x, pad.t + ph); g.stroke();
+    if (h.ok) dot(g, x, yOf(h.dist_m), C.series, C.surface);
+    $(tip, "strong").textContent = h.ok ? `${h.dist_m.toFixed(3)} m` : `실패 · ${h.reason}`;
+    $(tip, "span").textContent = `${(now - h.t).toFixed(1)}초 전` + (h.ok && h.dfp != null ? ` · RX−FP ${h.dfp.toFixed(1)} dB` : "");
+    tip.style.display = "block";
+    const tw = tip.offsetWidth;
+    const left = x + 12 + tw > W ? x - 12 - tw : x + 12;
+    const y = h.ok ? yOf(h.dist_m) : failY;
+    tip.style.left = `${cv.offsetLeft + left}px`;   // 툴팁은 .chart 기준, 그래프는 제목 아래에 있음
+    tip.style.top = `${cv.offsetTop + Math.max(0, Math.min(H - tip.offsetHeight, y - tip.offsetHeight / 2))}px`;
+  } else {
+    tip.style.display = "none";
+  }
+}
+
+function dot(g, x, y, fill, ring) {
+  g.beginPath(); g.arc(x, y, 6, 0, Math.PI * 2); g.fillStyle = ring; g.fill();
+  g.beginPath(); g.arc(x, y, 4, 0, Math.PI * 2); g.fillStyle = fill; g.fill();
+}
+
+// ---------------- 렌더 루프 (10 fps) ----------------
+setInterval(() => {
+  for (const b of boards.values()) {
+    const live = b.state.status === "live";
+    // 그래프가 시간에 따라 흐르고 '응답 없음'도 시간으로 정해지므로 매번 그린다
+    if (live && b.state.firmware === "tag") renderTag(b);
+    else if (live && b.state.firmware === "anchor") renderAnchor(b);
+    if (b.logDirty) {
+      $(b.el, ".log").textContent = b.logLines.join("\n");
+      b.logDirty = false;
+    }
+    b.dirty = false;
+  }
+}, 100);
+
+connect();
+</script>
+</body>
+</html>
