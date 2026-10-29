@@ -221,7 +221,7 @@ cd jetson_nano && python3 main.py
 개별 단계를 튜닝하는 대신 **시야에 의존하지 않는 측위**로 바꾸면 상당수가 함께 사라진다.
 **UWB**를 검토 중이다 — 오차 ±10 cm, 현대·기아가 디지털키에 이미 상용화, 설치 위치·각도 제약이 적다.
 
-> **조사와 장비 구매까지 진행했다. 실험은 시작하지 않았다.**
+> **2026-10 실험을 시작했다. 앵커 1 + 태그 1로 거리 측정까지 동작한다 — [src/v3_uwb](src/v3_uwb/).**
 
 ---
 
@@ -235,5 +235,7 @@ cd jetson_nano && python3 main.py
 | [Jetson 부하 테스트](src/v2_vision/jetson_부하테스트_보고서.md) | 전체 측정 기록 |
 | [세그멘테이션 실험](src/v2_vision/seg_experiment/RESULTS.md) | 대안 검토 |
 | [V1 전체 정리](src/v1_aroundview/NOTES.md) | 8단계 파이프라인 |
+| [V3 UWB](src/v3_uwb/README.md) | 보드 · 펌웨어 · 측정 도구 · 실험 계획 |
+| [UWB 원리 정리](src/v3_uwb/UWB_원리_정리.md) | TWR · 높이 차이 · 오차 원인 |
 | [발표자료](files/) | 0301 · 0821 · 0901 |
 | [프로젝트 소개 페이지](https://bell-ha.github.io/projects/wheelchair-parking/) | 요약 · 도면 · 데모 |
