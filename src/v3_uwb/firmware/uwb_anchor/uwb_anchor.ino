@@ -1,20 +1,34 @@
 /*
- * uwb_anchor — SS-TWR 응답자(앵커). 태그(uwb_tag)의 poll을 받으면 타임스탬프를 담아 응답한다.
- * 거리 계산은 태그 쪽에서 한다. 앵커는 전원만 있으면 되고 PC 연결은 필요 없다.
+ * uwb_anchor — 앵커 (차에 다는 쪽). 자기 번호로 온 poll에만 답한다 (SS-TWR 응답자).
+ * 거리 계산은 태그가 한다. 앵커는 전원만 있으면 되고 PC 연결은 필요 없다.
+ *
+ * 업로드 전에 아래 "보드마다 바꾸는 값" 두 줄만 확인한다.
  *
  * 출처: Makerfabs-ESP32-UWB-DW3000 example/range/range_tx (Qorvo ex_06b 기반)
  * 바꾼 것:
- *   - 부팅 시 칩 ID·안테나 지연을 '#' 주석 줄로 출력 (보드 식별용)
- *   - 1초마다 응답 횟수를 출력 → 태그와 통신이 되고 있는지 앵커 쪽에서도 보임
+ *   - 번호(MY_ID): 자기 번호로 온 poll에만 답하고, 물어본 태그에게 답한다 → 앵커 여러 개를 같이 켤 수 있다
+ *   - 부팅 시 번호·MAC·안테나 지연을 '#' 줄로 출력 (보드 확인용)
+ *   - 1초마다 태그별 응답 횟수 출력
+ *
+ * 무선 메시지 — IEEE 802.15.4 데이터 프레임 모양. 주소 2바이트에 번호 글자 2개("A1", "T2")를 넣는다
+ *   poll      41 88 seq CA DE | 받는쪽 2 | 보내는쪽 2 | E0                                   (+CRC 2 = 12바이트)
+ *   response  41 88 seq CA DE | 받는쪽 2 | 보내는쪽 2 | E1 | poll 받은 시각 4 | 응답 보낸 시각 4 (+CRC 2 = 20바이트)
  *
  * 출력 (115200bps):
- *   # ...                     부팅 정보
- *   # replies=<n> per 1s      지난 1초 동안 응답한 횟수 (트래픽이 있을 때만)
+ *   # uwb_anchor id=A1 mac=.. ant_dly=.. dev_id=..    부팅 정보
+ *   # replies=<합계> per 1s (T1=.. T2=..)             지난 1초 동안 응답한 횟수 (요청이 있을 때만)
  */
 #include "dw3000.h"
 #include "SPI.h"
+#include <esp_system.h>
 
 extern SPISettings _fastSPI;
+
+// ======================================================
+// 보드마다 바꾸는 값 — 업로드 전에 확인
+// ======================================================
+#define MY_ID "A1"        // 첫 번째 앵커 "A1", 두 번째 앵커 "A2". 두 보드에 같은 번호를 넣으면 안 된다
+#define ANT_DLY 16385     // 이 보드의 안테나 지연. 보정 전 기본값 16385 (보정값은 docs/UWB_설명.txt 2절 보드 목록)
 
 // ======================================================
 // Pin map — 보드 내부 배선 (ESP32 <-> DW3000). 바꾸지 말 것
@@ -24,16 +38,20 @@ extern SPISettings _fastSPI;
 #define PIN_SS 4
 
 // ======================================================
-// Ranging — 태그와 반드시 같은 값이어야 하는 것들
+// Ranging — 태그 코드와 반드시 같은 값이어야 하는 것들
 // ======================================================
-#define TX_ANT_DLY 16385   // 안테나 지연 (보정 전 기본값). 보정 후 보드별로 바꾼다
-#define RX_ANT_DLY 16385
-#define ALL_MSG_COMMON_LEN 10
-#define ALL_MSG_SN_IDX 2
-#define RESP_MSG_POLL_RX_TS_IDX 10
-#define RESP_MSG_RESP_TX_TS_IDX 14
-#define RESP_MSG_TS_LEN 4
-#define POLL_RX_TO_RESP_TX_DLY_UUS 900   // poll 수신 → 응답 송신까지 (태그의 대기시간과 짝)
+#define POLL_RX_TO_RESP_TX_DLY_UUS 900   // poll 받고 응답 보내기까지 (태그의 대기시간과 짝)
+
+#define FUNC_POLL 0xE0
+#define FUNC_RESP 0xE1
+#define IDX_SEQ 2
+#define IDX_DST 5          // 받는 쪽 번호 2바이트
+#define IDX_SRC 7          // 보내는 쪽 번호 2바이트
+#define IDX_FUNC 9
+#define IDX_POLL_RX_TS 10
+#define IDX_RESP_TX_TS 14
+#define POLL_LEN 12        // CRC 포함
+#define RESP_LEN 20
 
 /* 채널 5, 프리앰블 128, 코드 9(PRF 64 MHz), 6.8 Mbps. STS·PDoA 끔 (단일 안테나 칩) */
 static dwt_config_t config = {
@@ -52,18 +70,18 @@ static dwt_config_t config = {
     DWT_PDOA_M0       /* PDOA mode off */
 };
 
-static uint8_t rx_poll_msg[] = {0x41, 0x88, 0, 0xCA, 0xDE, 'W', 'A', 'V', 'E', 0xE0, 0, 0};
-static uint8_t tx_resp_msg[] = {0x41, 0x88, 0, 0xCA, 0xDE, 'V', 'E', 'W', 'A', 0xE1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-static uint8_t frame_seq_nb = 0;
-static uint8_t rx_buffer[20];
-static uint32_t status_reg = 0;
-static uint64_t poll_rx_ts;
-static uint64_t resp_tx_ts;
-
-static uint32_t replies = 0;
-static uint32_t last_report_ms = 0;
-
 extern dwt_txconfig_t txconfig_options;
+
+static uint8_t frame_seq_nb = 0;
+static uint8_t rx_buffer[POLL_LEN];
+
+// 태그별 응답 횟수 (1초마다 출력하고 비운다). 처음 보는 태그 번호를 차례로 칸에 넣는다
+#define MAX_TAGS 4
+static char tag_ids[MAX_TAGS][3];
+static uint32_t tag_replies[MAX_TAGS];
+static int n_tags = 0;
+static uint32_t replies_total = 0;
+static uint32_t last_report_ms = 0;
 
 static void halt(const char *msg)
 {
@@ -72,15 +90,54 @@ static void halt(const char *msg)
     ;
 }
 
+static bool is_me(const uint8_t *field)
+{
+  return field[0] == (uint8_t)MY_ID[0] && field[1] == (uint8_t)MY_ID[1];
+}
+
+static void count_reply(const uint8_t *src)
+{
+  replies_total++;
+  for (int i = 0; i < n_tags; i++)
+    if (tag_ids[i][0] == src[0] && tag_ids[i][1] == src[1])
+    {
+      tag_replies[i]++;
+      return;
+    }
+  if (n_tags < MAX_TAGS)
+  {
+    tag_ids[n_tags][0] = src[0];
+    tag_ids[n_tags][1] = src[1];
+    tag_ids[n_tags][2] = 0;
+    tag_replies[n_tags++] = 1;
+  }
+}
+
+static void report()
+{
+  uint32_t now = millis();
+  if (now - last_report_ms < 1000)
+    return;
+  if (replies_total > 0)
+  {
+    Serial.printf("# replies=%lu per 1s (", (unsigned long)replies_total);
+    for (int i = 0; i < n_tags; i++)
+      Serial.printf("%s%s=%lu", i ? " " : "", tag_ids[i], (unsigned long)tag_replies[i]);
+    Serial.println(")");
+  }
+  replies_total = 0;
+  for (int i = 0; i < n_tags; i++)
+    tag_replies[i] = 0;
+  last_report_ms = now;
+}
+
 void setup()
 {
   UART_init();
 
   _fastSPI = SPISettings(7000000L, MSBFIRST, SPI_MODE0);
-
   spiBegin(PIN_IRQ, PIN_RST);
   spiSelect(PIN_SS);
-
   delay(2); // DW3000 기동 대기 (INIT_RC -> IDLE_RC)
 
   dwt_softreset();
@@ -95,71 +152,69 @@ void setup()
 
   if (dwt_configure(&config))
     halt("CONFIG FAILED");
-
   dwt_configuretxrf(&txconfig_options);
 
-  dwt_setrxantennadelay(RX_ANT_DLY);
-  dwt_settxantennadelay(TX_ANT_DLY);
-
+  dwt_setrxantennadelay(ANT_DLY);
+  dwt_settxantennadelay(ANT_DLY);
   dwt_setlnapamode(DWT_LNA_ENABLE | DWT_PA_ENABLE);
 
-  Serial.printf("# uwb_anchor dev_id=%08lx tx_ant_dly=%d rx_ant_dly=%d\n",
-                (unsigned long)dwt_readdevid(), TX_ANT_DLY, RX_ANT_DLY);
+  uint8_t mac[6];
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  Serial.printf("# uwb_anchor id=%s mac=%02x:%02x:%02x:%02x:%02x:%02x ant_dly=%d dev_id=%08lx\n",
+                MY_ID, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], ANT_DLY, (unsigned long)dwt_readdevid());
 }
 
 void loop()
 {
+  uint32_t status_reg;
+
   /* 즉시 수신 시작. 타임아웃 없이 poll이 올 때까지 기다린다 */
   dwt_rxenable(DWT_START_RX_IMMEDIATE);
-
   while (!((status_reg = dwt_read32bitreg(SYS_STATUS_ID)) & (SYS_STATUS_RXFCG_BIT_MASK | SYS_STATUS_ALL_RX_ERR)))
   {
   };
 
   if (status_reg & SYS_STATUS_RXFCG_BIT_MASK)
   {
-    uint32_t frame_len;
-
     dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_RXFCG_BIT_MASK);
+    uint32_t frame_len = dwt_read32bitreg(RX_FINFO_ID) & RXFLEN_MASK;
 
-    frame_len = dwt_read32bitreg(RX_FINFO_ID) & RXFLEN_MASK;
-    if (frame_len <= sizeof(rx_buffer))
+    /* 내 번호로 온 poll만 답한다. 다른 앵커 앞으로 온 poll, 다른 앵커의 응답 등은 무시 */
+    if (frame_len == POLL_LEN)
     {
       dwt_readrxdata(rx_buffer, frame_len, 0);
-
-      /* 시퀀스 번호는 비교에서 빼고, 태그가 보낸 poll인지만 확인 */
-      rx_buffer[ALL_MSG_SN_IDX] = 0;
-      if (memcmp(rx_buffer, rx_poll_msg, ALL_MSG_COMMON_LEN) == 0)
+      if (rx_buffer[IDX_FUNC] == FUNC_POLL && is_me(&rx_buffer[IDX_DST]))
       {
-        uint32_t resp_tx_time;
-        int ret;
-
-        poll_rx_ts = get_rx_timestamp_u64();
+        uint8_t tx_resp[RESP_LEN - 2] = {0x41, 0x88, 0, 0xCA, 0xDE};   // CRC 2바이트는 칩이 붙인다
+        uint64_t poll_rx_ts = get_rx_timestamp_u64();
 
         /* 응답은 poll 수신 시각 + 고정 지연에 예약 송신. 그래야 송신 시각을 미리 알고 메시지에 담을 수 있다 */
-        resp_tx_time = (poll_rx_ts + (POLL_RX_TO_RESP_TX_DLY_UUS * UUS_TO_DWT_TIME)) >> 8;
+        uint32_t resp_tx_time = (poll_rx_ts + (POLL_RX_TO_RESP_TX_DLY_UUS * UUS_TO_DWT_TIME)) >> 8;
         dwt_setdelayedtrxtime(resp_tx_time);
-
         /* 실제 송신 타임스탬프 = 예약 시각 + 안테나 지연 */
-        resp_tx_ts = (((uint64_t)(resp_tx_time & 0xFFFFFFFEUL)) << 8) + TX_ANT_DLY;
+        uint64_t resp_tx_ts = (((uint64_t)(resp_tx_time & 0xFFFFFFFEUL)) << 8) + ANT_DLY;
 
-        resp_msg_set_ts(&tx_resp_msg[RESP_MSG_POLL_RX_TS_IDX], poll_rx_ts);
-        resp_msg_set_ts(&tx_resp_msg[RESP_MSG_RESP_TX_TS_IDX], resp_tx_ts);
+        tx_resp[IDX_SEQ] = frame_seq_nb;
+        tx_resp[IDX_DST] = rx_buffer[IDX_SRC];         // 물어본 태그에게
+        tx_resp[IDX_DST + 1] = rx_buffer[IDX_SRC + 1];
+        tx_resp[IDX_SRC] = MY_ID[0];
+        tx_resp[IDX_SRC + 1] = MY_ID[1];
+        tx_resp[IDX_FUNC] = FUNC_RESP;
+        resp_msg_set_ts(&tx_resp[IDX_POLL_RX_TS], poll_rx_ts);
+        resp_msg_set_ts(&tx_resp[IDX_RESP_TX_TS], resp_tx_ts);
 
-        tx_resp_msg[ALL_MSG_SN_IDX] = frame_seq_nb;
-        dwt_writetxdata(sizeof(tx_resp_msg), tx_resp_msg, 0);
-        dwt_writetxfctrl(sizeof(tx_resp_msg), 0, 1);
-        ret = dwt_starttx(DWT_START_TX_DELAYED);
+        dwt_writetxdata(sizeof(tx_resp), tx_resp, 0);
+        dwt_writetxfctrl(sizeof(tx_resp) + 2, 0, 1);
 
         /* 예약 시각을 이미 지나쳤으면 실패 — 이번 교환은 버리고 다음 poll을 기다린다 */
-        if (ret == DWT_SUCCESS)
+        if (dwt_starttx(DWT_START_TX_DELAYED) == DWT_SUCCESS)
         {
           while (!(dwt_read32bitreg(SYS_STATUS_ID) & SYS_STATUS_TXFRS_BIT_MASK))
           {
           };
           dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_TXFRS_BIT_MASK);
           frame_seq_nb++;
-          replies++;
+          count_reply(&rx_buffer[IDX_SRC]);
         }
       }
     }
@@ -169,12 +224,5 @@ void loop()
     dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_ALL_RX_ERR);
   }
 
-  uint32_t now = millis();
-  if (now - last_report_ms >= 1000)
-  {
-    if (replies > 0)
-      Serial.printf("# replies=%lu per 1s\n", (unsigned long)replies);
-    replies = 0;
-    last_report_ms = now;
-  }
+  report();
 }

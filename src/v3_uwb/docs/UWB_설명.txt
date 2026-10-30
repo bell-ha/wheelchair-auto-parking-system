@@ -1,0 +1,163 @@
+UWB 설명
+========
+
+문제가 생겼을 때는 문제해결.txt.
+
+구성
+  앵커  차에 고정. 위치를 미리 재 둔 기준점. 태그가 물으면 답만 한다. 전원만 있으면 된다.
+  태그  휠체어에 단다. 앵커들에게 차례로 물어 거리를 계산하고, 결과를 USB로 컴퓨터에 보낸다.
+  거리  태그 안테나와 앵커 안테나 사이의 직선거리 (높이 차이도 포함된다).
+
+
+1. 보드
+-------
+ESP32 UWB DW3000 (Makerfabs 호환품, 빨간 기판) x 4
+
+  두뇌      ESP32-WROOM-32E
+  무선      DW3000 모듈 "UWB-X3". 칩 ID deca0302. 안테나 1개라 거리만 잰다 (각도 X)
+  안테나    UWB 모듈 옆 흰색 부분 (UWB4A 스티커) = 거리 기준점
+  USB       CP2104. 포트 이름 끝 = 칩 고유번호
+  전원      micro USB 5 V
+  버튼      RST(재시작), FLASH(업로드가 "Connecting..."에서 멈출 때 누른 채로)
+
+DW3000이 쓰는 ESP32 핀: RST 27, IRQ 34, CS 4, SPI 18 / 19 / 23. 다른 용도로 쓰지 않는다.
+부팅 때 나오는 "XTRIM OTP READ FAIL"은 호환 모듈이라 나오는 경고. 무시해도 된다.
+
+
+2. 보드 목록
+------------
+이름 = USB 칩 고유번호 끝 4자리 (보드 스티커). 번호 = 코드 맨 위 MY_ID.
+
+  이름   고유번호   MAC                 역할   번호   안테나 지연   상태
+  DFCA   030ADFCA   d8:bf:c0:86:c7:7c   태그   T1     16385         번호 붙인 펌웨어는 아직 안 올림
+  DFBB   030ADFBB   d8:bf:c0:84:f3:b4   앵커   A1     16385         번호 붙인 펌웨어는 아직 안 올림
+  (3번)                                  앵커   A2                   미점검 - 공장 펌웨어 그대로
+  (4번)                                  태그   T2                   미점검 - 공장 펌웨어 그대로
+
+
+3. 거리 재는 방법 (SS-TWR)
+--------------------------
+  태그                                    앵커
+    T1 ---- poll ---------------------> T2
+                                         |  0.9 ms 뒤 답장
+    T4 <------------------- response -- T3     (T2, T3를 실어 보냄)
+
+  비행시간 = ((T4 - T1) - (T3 - T2)) / 2
+  거리     = 비행시간 x 299,702,547 m/s
+
+- 두 보드의 시계는 맞출 필요 없다. 시계 속도 차이는 태그가 받은 신호로 보정한다 (clk_ppm).
+- DW3000 시계 1칸 = 15.65 ps = 4.69 mm.
+
+
+4. 통신
+-------
+- 보드끼리 UWB 무선(6.5 GHz)으로 직접 주고받는다. 와이파이·공유기·페어링 없음.
+- 두 코드의 무선 설정이 같아야 한다: 채널 5, 프리앰블 128 / 코드 9, 6.8 Mbps.
+- 메시지 주소에 번호(MY_ID)를 넣는다. 앵커는 자기 번호로 온 요청에만 답하고,
+  태그는 자기가 물어본 앵커가 자기에게 보낸 답만 받는다.
+- poll 12바이트 (태그 -> 앵커), response 20바이트 (앵커 -> 태그, T2·T3 포함).
+- 태그는 A1, A2 순서로 묻는다. 한 바퀴 0.1초 = 앵커마다 1초에 10번.
+  답이 계속 없는 앵커는 1초에 한 번만 다시 묻는다.
+  태그 2개가 같은 순간에 말하지 않게 쉬는 시간을 매번 ±15 ms 흔든다.
+- 맥북은 USB로 전원과 데이터만 주고받는다. 거리는 보드끼리 잰다.
+
+
+5. 펌웨어 올리기
+----------------
+처음 한 번
+  - 라이브러리: https://github.com/Makerfabs/Makerfabs-ESP32-UWB-DW3000 (커밋 9d449b8)의 Dw3000 폴더를
+    ~/Documents/Arduino/libraries/ 에 복사
+  - 보드 패키지: "esp32 (Espressif)" 2.0.17, 보드 "ESP32 Dev Module"
+  - Python: pip install pyserial
+
+올리기 전에 코드 맨 위 두 줄
+  MY_ID    앵커 "A1"/"A2", 태그 "T1"/"T2". 두 보드에 같은 번호를 넣지 않는다.
+  ANT_DLY  안테나 지연. 2절 보드 목록 값 (보정 전 16385).
+
+Arduino IDE: .ino 열기 -> MY_ID 확인 -> 보드·포트 고르기 -> Upload Speed 115200 -> 업로드
+
+터미널:
+  CLI="/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli"
+  cd src/v3_uwb/firmware
+  "$CLI" compile --fqbn esp32:esp32:esp32:UploadSpeed=115200 --upload -p /dev/cu.usbserial-030ADFCA uwb_tag
+  "$CLI" compile --fqbn esp32:esp32:esp32:UploadSpeed=115200 --upload -p /dev/cu.usbserial-030ADFBB uwb_anchor
+
+- 화면(live_view.py)이 켜져 있으면 그 보드 카드에서 "포트 놓기" 후 업로드, 끝나면 "다시 잡기".
+- 무선 설정이나 응답 지연을 바꾸면 앵커·태그 코드를 같이 바꿔 올린다.
+- 앵커를 늘리면 태그 코드의 ANCHORS 목록에 번호를 추가한다.
+
+
+6. 태그 출력
+------------
+  R,ms,seq,tag,anchor,dist_m,clk_ppm,C,F1,F2,F3,N,D   성공
+  E,ms,seq,tag,anchor,reason                          실패 (timeout, rx_err, bad_frame)
+
+  tag, anchor   어느 태그가 어느 앵커까지 잰 것인지
+  dist_m        거리 (m)
+  clk_ppm       앵커 대비 태그 시계 차이
+  C~D           수신 신호 원시값. dBm 환산은 tools/live_view.py
+
+앵커 출력: 1초마다 "# replies=19 per 1s (T1=10 T2=9)"
+
+
+7. 설정값
+---------
+  채널 5 (6.5 GHz) / 프리앰블 128, 코드 9 (PRF 64 MHz) / 6.8 Mbps
+  응답 대기 0.9 ms / 측정 주기 한 바퀴 100 ms / 안테나 지연 기본 16385
+
+
+8. 오차 원인
+------------
+- 안테나 지연: 거리와 상관없는 고정 오차. 0.41 m에서 +5.5 cm.
+  여러 거리에서 기록해 실제 거리와의 차이를 구하고, 두 보드의 ANT_DLY를 고친다
+  (두 보드 모두 1칸 늘리면 거리가 9.4 mm 줄어든다). 보드별 값은 보드 3개로 쌍마다 재서 푼다.
+- 높이 차이: 실제보다 길게 나온다. 같은 높이에서 잰다.
+- 안테나 방향: 방향에 따라 값이 달라진다. 방향을 고정한다.
+- 가림(차체, 사람): 길게 나오고 실패가 는다. 이때 RX-FP가 커진다
+  (DW1000 기준 6 dB 미만 트임, 10 dB 넘으면 가림. DW3000 기준은 직접 재서 정한다).
+- 시계 차이: 보정된다. 첫 측정에서 약 0.1 ppm.
+
+
+9. 주의할 점
+------------
+- 3V3 핀에 5 V를 넣지 않는다. 핀으로 전원을 줄 때 5 V는 5V 핀에.
+- 금속 위에 올려놓지 않는다 (합선, 전파 방해).
+- 만지기 전에 금속을 짚어 정전기를 뺀다. 안테나와 UWB 모듈은 만지지 않는다.
+- micro USB는 똑바로 뽑는다 (가장 약한 부품).
+- 공장 펌웨어 보드는 꺼 둔다 (같은 설정으로 신호를 쏴서 측정과 겹친다).
+- 같은 번호를 가진 보드를 둘 켜지 않는다.
+- 기록할 때: 같은 높이, 방향 고정, 줄자는 안테나 중심끼리, 1 m 이상, 보드에서 떨어져 있기.
+- 보조배터리는 적은 전류에서 저절로 꺼질 수 있다.
+- 한 포트는 한 프로그램만 연다 (화면, 시리얼 모니터, 업로드).
+
+
+10. 상시 설치 (차, 휠체어)
+--------------------------
+- 열: 여름 차 안은 70도 넘음. ESP32 등급 -40~85도, UWB-X3는 등급 불명. 햇빛 직사·대시보드 피하기.
+- 케이스: PETG 이상, 차 밖은 ASA. 금속·탄소섬유·금속 도장 안 됨 (전파 차단).
+- 진동: 모서리 구멍 4개로 나사 고정. 상시 설치는 micro USB 대신 5V·GND 핀에 납땜.
+- 물: 방수 케이스(IP65), 실리카겔.
+- 전원: 차 12 V는 서지 보호 있는 5 V 변환기, 휠체어 24 V는 5 V 강압 변환기. 앵커 상시 전원은 차 배터리 소모.
+- 안테나: 금속에서 몇 cm 띄운다. 케이스를 씌운 상태로 안테나 지연을 다시 보정한다.
+- 예비: 4개를 다 쓰면 예비가 없다. 1~2개 더 산다.
+
+
+11. 한계
+--------
+- 거리만 나온다. 위치는 앵커 2개면 후보가 두 곳, 3개면 한 곳. 방향은 태그 2개를 잇거나 IMU로.
+- SS-TWR라 DS-TWR보다 시계 오차에 약하다.
+- 안테나 지연 미보정 (16385).
+- 태그 2개의 충돌은 시간을 흔들어 피할 뿐, 가끔 겹쳐 실패할 수 있다.
+
+
+출처
+----
+- NLOS 판별 (RX-FP 6 / 10 dB): https://forum.qorvo.com/t/nlos-detection-manual-and-example/16675
+- TWR 오차 원인 (Qorvo APS011): https://www.qorvo.com/products/d/da008446
+- 안테나 지연 보정 (Qorvo APS014): https://www.qorvo.com/products/d/da008449
+- 보드 3개로 안테나 지연 풀기: https://forum.qorvo.com/t/unexpected-cumulative-antenna-delay-results-in-dw1000-two-device-calibration/25756
+- 방향에 따른 안테나 지연: https://forum.qorvo.com/t/dwm3000-as-antenna-delay-reference-test-board/13256
+- DW3000 수신 세기 공식: https://forum.qorvo.com/t/dw3020-rssi-level-calculation/11986
+- ESP32-WROOM-32E 데이터시트: https://www.espressif.com/sites/default/files/documentation/esp32-wroom-32e_esp32-wroom-32ue_datasheet_en.pdf
+- DW3000 데이터시트: https://www.mouser.com/datasheet/2/412/DW3000_Data_Sheet-3532945.pdf
+- Makerfabs 저장소: https://github.com/Makerfabs/Makerfabs-ESP32-UWB-DW3000

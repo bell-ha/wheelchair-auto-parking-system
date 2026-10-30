@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>UWB 실시간 보기</title>
 <style>
+  /* 색: dataviz 기준 팔레트. 앵커 색 1·2·3은 validate_palette.js로 라이트·다크 모두 통과 (2026-10-30) */
   :root {
     color-scheme: light;
     --page: #f9f9f7;
@@ -16,8 +17,9 @@
     --axis: #c3c2b7;
     --border: rgba(11, 11, 11, 0.10);
     --wash: rgba(11, 11, 11, 0.04);
-    --series: #2a78d6;
-    --series-wash: rgba(42, 120, 214, 0.10);
+    --s1: #2a78d6;
+    --s2: #eb6834;
+    --s3: #1baf7a;
     --good: #0ca30c;
     --warning: #fab219;
     --critical: #d03b3b;
@@ -36,8 +38,9 @@
       --axis: #383835;
       --border: rgba(255, 255, 255, 0.10);
       --wash: rgba(255, 255, 255, 0.05);
-      --series: #3987e5;
-      --series-wash: rgba(57, 135, 229, 0.12);
+      --s1: #3987e5;
+      --s2: #d95926;
+      --s3: #199e70;
       --accent: #3987e5;
     }
   }
@@ -52,8 +55,9 @@
     --axis: #383835;
     --border: rgba(255, 255, 255, 0.10);
     --wash: rgba(255, 255, 255, 0.05);
-    --series: #3987e5;
-    --series-wash: rgba(57, 135, 229, 0.12);
+    --s1: #3987e5;
+    --s2: #d95926;
+    --s3: #199e70;
     --accent: #3987e5;
   }
 
@@ -77,7 +81,6 @@
 
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 560px), 1fr)); gap: 16px; }
   .empty { color: var(--ink-2); background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; }
-  .empty code { font-size: 13px; }
 
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; min-width: 0; }
   .card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 12px; }
@@ -95,45 +98,53 @@
   button.primary:hover { filter: brightness(1.08); }
   button:disabled { opacity: 0.5; cursor: default; }
   input {
-    font: inherit; font-size: 13px; padding: 5px 8px; border-radius: 8px; width: 88px;
+    font: inherit; font-size: 13px; padding: 5px 8px; border-radius: 8px; width: 80px;
     border: 1px solid var(--border); background: var(--page); color: var(--ink-1);
   }
   input.wide { width: 120px; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-  .hero-row { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; }
-  .hero-value { font-size: 52px; font-weight: 600; line-height: 1; letter-spacing: -0.02em; }
-  .hero-value .unit { font-size: 20px; font-weight: 500; color: var(--ink-2); margin-left: 4px; letter-spacing: 0; }
-  .hero-label { color: var(--ink-2); font-size: 13px; margin-top: 6px; }
-  .truth { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--ink-2); font-size: 13px; }
-  .truth .err { color: var(--ink-1); font-weight: 600; min-width: 96px; }
+  .alert { margin: 0 0 10px; color: var(--ink-1); font-weight: 600; }
 
-  .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 16px 0 4px; }
-  @media (max-width: 520px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-  .tile { background: var(--page); border-radius: 8px; padding: 8px 10px; min-width: 0; }
-  .tile-label { color: var(--ink-2); font-size: 12px; }
-  .tile-value { font-size: 18px; font-weight: 600; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .tile-sub { color: var(--ink-3); font-size: 12px; }
-  .meta { color: var(--ink-3); font-size: 12px; margin: 6px 0 0; }
+  /* 앵커마다 한 칸 */
+  .anchors { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 10px; }
+  .ablock { background: var(--page); border-radius: 10px; padding: 10px 12px; min-width: 0; }
+  .ahead { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); }
+  .ahead b { color: var(--ink-1); font-size: 15px; }
+  .astate { margin-left: auto; font-size: 12px; color: var(--ink-3); text-align: right; }
+  .acur { font-size: 36px; font-weight: 600; line-height: 1.1; letter-spacing: -0.02em; margin: 4px 0 6px; }
+  .acur .unit { font-size: 16px; font-weight: 500; color: var(--ink-2); margin-left: 3px; letter-spacing: 0; }
+  .astats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 10px; font-size: 12px; }
+  .astats .k { color: var(--ink-3); margin-right: 6px; }
+  .astats .v { color: var(--ink-1); font-weight: 600; }
+  .atruth { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--ink-2); font-size: 12px; margin-top: 8px; }
+  .atruth .a-err { color: var(--ink-1); font-weight: 600; }
+
+  .line-key { display: inline-block; width: 16px; height: 2px; border-radius: 1px; flex: none; }
+  .meta { color: var(--ink-3); font-size: 12px; margin: 8px 0 0; }
 
   .chart { position: relative; margin-top: 14px; }
   .chart-title { font-size: 13px; color: var(--ink-2); margin-bottom: 4px; }
-  .chart canvas { display: block; width: 100%; height: 190px; border-radius: 6px; }
+  .chart canvas { display: block; width: 100%; height: 200px; border-radius: 6px; }
   .key { display: flex; flex-wrap: wrap; gap: 14px; color: var(--ink-2); font-size: 12px; margin-top: 4px; }
   .key span { display: inline-flex; align-items: center; gap: 6px; }
-  .key .line-key { width: 16px; height: 2px; border-radius: 1px; background: var(--series); }
-  .key .ref-key { width: 16px; height: 1px; background: var(--ink-2); }
+  .key .thin { height: 1px; opacity: 0.7; }
   .key .x-key { color: var(--critical); font-weight: 700; }
   .tooltip {
     position: absolute; pointer-events: none; display: none; z-index: 2;
     background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12); padding: 6px 10px; font-size: 12px; white-space: nowrap;
   }
-  .tooltip strong { display: block; font-size: 14px; color: var(--ink-1); }
-  .tooltip span { color: var(--ink-2); }
+  .tooltip .trow { display: flex; align-items: center; gap: 6px; }
+  .tooltip .trow strong { font-size: 14px; color: var(--ink-1); }
+  .tooltip .trow span, .tooltip .ttime { color: var(--ink-2); }
 
   .record { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 13px; color: var(--ink-2); }
   .record .progress { flex-basis: 100%; color: var(--ink-1); font-size: 12px; overflow-wrap: anywhere; }
+
+  .hero-value { font-size: 52px; font-weight: 600; line-height: 1; letter-spacing: -0.02em; }
+  .hero-value .unit { font-size: 20px; font-weight: 500; color: var(--ink-2); margin-left: 4px; letter-spacing: 0; }
+  .hero-label { color: var(--ink-2); font-size: 13px; margin-top: 6px; }
 
   .message { color: var(--ink-2); background: var(--page); border-radius: 8px; padding: 12px; margin: 0; }
   .message strong { color: var(--ink-1); }
@@ -145,10 +156,11 @@
     font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink-2);
     max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
   }
+  .table-wrap { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; font-variant-numeric: tabular-nums; }
-  th, td { text-align: right; padding: 3px 6px; border-bottom: 1px solid var(--grid); }
+  th, td { text-align: right; padding: 3px 6px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
   th { color: var(--ink-3); font-weight: 500; }
-  th:first-child, td:first-child { text-align: left; }
+  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -178,48 +190,33 @@
     </header>
 
     <section class="tag-view" hidden>
-      <div class="hero-row">
-        <div>
-          <div class="hero-value"><span class="cur">—</span><span class="unit">m</span></div>
-          <div class="hero-label cur-label">현재 거리</div>
-        </div>
-        <label class="truth">실제 거리 <input class="truth-in" type="number" step="0.01" min="0" placeholder="줄자 값"> m
-          <span class="err"></span></label>
-      </div>
-
-      <div class="tiles">
-        <div class="tile"><div class="tile-label">평균</div><div class="tile-value t-mean">—</div><div class="tile-sub t-sd">최근 성공 50개</div></div>
-        <div class="tile"><div class="tile-label">성공률</div><div class="tile-value t-rate">—</div><div class="tile-sub t-rate-sub">최근 시도 50개</div></div>
-        <div class="tile"><div class="tile-label">측정 속도</div><div class="tile-value t-hz">—</div><div class="tile-sub">최근 5초</div></div>
-        <div class="tile"><div class="tile-label">RX − FP</div><div class="tile-value t-dfp">—</div><div class="tile-sub">작을수록 직진파 위주</div></div>
-      </div>
+      <p class="alert" hidden></p>
+      <div class="anchors"></div>
       <p class="meta t-meta"></p>
 
       <div class="chart">
-        <div class="chart-title">거리 · 최근 30초</div>
-        <canvas tabindex="0" aria-label="최근 30초 거리 그래프. 좌우 화살표로 측정값을 하나씩 볼 수 있음"></canvas>
-        <div class="tooltip"><strong></strong><span></span></div>
-        <div class="key">
-          <span><i class="line-key"></i>측정 거리</span>
-          <span><i class="ref-key"></i>실제 거리</span>
-          <span><b class="x-key">×</b>측정 실패</span>
-        </div>
+        <div class="chart-title">앵커까지 거리 · 최근 30초</div>
+        <canvas tabindex="0" aria-label="최근 30초 앵커별 거리 그래프. 좌우 화살표로 측정값을 하나씩 볼 수 있음"></canvas>
+        <div class="tooltip"><div class="trows"></div><span class="ttime"></span></div>
+        <div class="key"></div>
       </div>
 
       <div class="record">
         <span>기록</span>
         <input class="rec-cond wide" list="conds" value="los" aria-label="조건">
-        <input class="rec-n" type="number" min="1" value="300" aria-label="목표 개수"> 개
+        <input class="rec-n" type="number" min="1" value="300" aria-label="앵커마다 목표 개수"> 개씩
         <button class="rec-btn primary" type="button">기록 시작</button>
         <span class="progress"></span>
       </div>
 
       <details class="table-details">
         <summary>최근 측정 표</summary>
-        <table>
-          <thead><tr><th>시점</th><th>결과</th><th>거리 (m)</th><th>RX − FP (dB)</th><th>RX (dBm)</th></tr></thead>
-          <tbody></tbody>
-        </table>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>시점</th><th>앵커</th><th>결과</th><th>거리 (m)</th><th>RX − FP (dB)</th><th>RX (dBm)</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </details>
     </section>
 
@@ -237,6 +234,21 @@
   </article>
 </template>
 
+<template id="anchor-tpl">
+  <div class="ablock">
+    <div class="ahead"><i class="line-key"></i><b class="a-name"></b><span class="astate"></span></div>
+    <div class="acur"><span class="a-cur">—</span><span class="unit">m</span></div>
+    <div class="astats">
+      <div><span class="k">평균</span><span class="v a-mean">—</span></div>
+      <div><span class="k">흔들림</span><span class="v a-sd">—</span></div>
+      <div><span class="k">성공률</span><span class="v a-rate">—</span></div>
+      <div><span class="k">RX − FP</span><span class="v a-dfp">—</span></div>
+    </div>
+    <label class="atruth">실제 거리 <input class="truth-in" type="number" step="0.01" min="0" placeholder="줄자"> m
+      <span class="a-err"></span></label>
+  </div>
+</template>
+
 <datalist id="conds">
   <option value="los">가림 없음</option>
   <option value="nlos_car">차체에 가림</option>
@@ -247,7 +259,8 @@
 "use strict";
 const WINDOW_S = 30;        // 그래프 시간 폭
 const KEEP_S = 90;          // 메모리에 남길 기간
-const STAT_N = 50;          // 평균·성공률 계산 개수
+const STAT_N = 50;          // 앵커마다 평균·성공률 계산 개수
+const STALE_S = 2;          // 이만큼 새 측정이 없으면 "응답 없음"
 
 const FW_NAME = { tag: "태그", anchor: "앵커", factory: "공장 테스트 펌웨어", unknown: "펌웨어 확인 중" };
 const STATUS = {
@@ -255,10 +268,17 @@ const STATUS = {
   released: ["", "포트 놓음"], unplugged: ["", "뽑힘"],
 };
 
-const boards = new Map();   // port → {el, state, samples, anchor, logLines, ...}
+const boards = new Map();   // port → {el, state, samples, anchor, logLines, ablocks, ...}
 const $ = (root, sel) => root.querySelector(sel);
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const fmt = (v, d) => (v == null || Number.isNaN(v) ? "—" : v.toFixed(d));
+const signed = v => (v >= 0 ? "+" : "") + v.toFixed(1);
+
+// 색은 앵커 번호를 따라간다 (A1 → 1번 색, A2 → 2번 색). 순위나 등장 순서로 바뀌지 않음
+function seriesVar(anchor) {
+  const n = parseInt(String(anchor).slice(1), 10);
+  return `--s${Number.isFinite(n) ? Math.min(Math.max(n, 1), 3) : 3}`;
+}
 
 // ---------------- 서버 이벤트 ----------------
 function connect() {
@@ -283,10 +303,10 @@ function handle(ev) {
     b.samples.push(ev);
     const cut = Date.now() / 1000 - KEEP_S;
     while (b.samples.length && b.samples[0].t < cut) b.samples.shift();
-    b.dirty = true;
+    ensureAnchor(b, ev.anchor);
   } else if (ev.type === "anchor") {
     const b = boards.get(ev.port); if (!b) return;
-    b.anchor = ev; b.dirty = true;
+    b.anchor = ev;
   } else if (ev.type === "log") {
     const b = boards.get(ev.port); if (!b) return;
     b.logLines.push(ev.line);
@@ -305,7 +325,7 @@ function handle(ev) {
 function upsert(st) {
   let b = boards.get(st.port);
   if (!b) {
-    b = { state: st, samples: [], anchor: null, logLines: [], hover: null, dirty: true, logDirty: true };
+    b = { state: st, samples: [], anchor: null, logLines: [], hover: null, logDirty: true, ablocks: new Map() };
     b.el = buildCard(b);
     boards.set(st.port, b);
     const list = document.getElementById("boards");
@@ -327,16 +347,15 @@ function buildCard(b) {
   el.dataset.label = b.state.label;
   $(el, ".hold").addEventListener("click", () =>
     post(b.state.status === "released" ? "/api/attach" : "/api/release", { port: b.state.port }));
-  $(el, ".truth-in").addEventListener("input", () => { b.dirty = true; });
   $(el, ".rec-btn").addEventListener("click", () => toggleRecord(b));
 
   const cv = $(el, "canvas");
   cv.addEventListener("pointermove", e => {
     const r = cv.getBoundingClientRect();
-    b.hover = { x: e.clientX - r.left, idx: null }; b.dirty = true;
+    b.hover = { x: e.clientX - r.left, idx: null };
   });
-  cv.addEventListener("pointerleave", () => { b.hover = null; b.dirty = true; });
-  cv.addEventListener("blur", () => { b.hover = null; b.dirty = true; });
+  cv.addEventListener("pointerleave", () => { b.hover = null; });
+  cv.addEventListener("blur", () => { b.hover = null; });
   cv.addEventListener("keydown", e => {
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
     e.preventDefault();
@@ -344,17 +363,47 @@ function buildCard(b) {
     if (!vis.length) return;
     let i = b.hover && b.hover.idx != null ? b.hover.idx : vis.length;
     i = Math.max(0, Math.min(vis.length - 1, i + (e.key === "ArrowLeft" ? -1 : 1)));
-    b.hover = { idx: i, x: null }; b.dirty = true;
+    b.hover = { idx: i, x: null };
   });
   return el;
+}
+
+/* 처음 보는 앵커 번호면 칸을 만들고, 번호 순서로 정렬한다. 범례도 같이 다시 만든다 */
+function ensureAnchor(b, anchor) {
+  if (!anchor || b.ablocks.has(anchor)) return;
+  const blk = document.getElementById("anchor-tpl").content.firstElementChild.cloneNode(true);
+  blk.dataset.anchor = anchor;
+  $(blk, ".a-name").textContent = anchor;
+  $(blk, ".line-key").style.background = `var(${seriesVar(anchor)})`;
+  b.ablocks.set(anchor, blk);
+  const box = $(b.el, ".anchors");
+  box.appendChild(blk);
+  [...box.children].sort((x, y) => x.dataset.anchor.localeCompare(y.dataset.anchor)).forEach(n => box.appendChild(n));
+
+  const key = $(b.el, ".key");
+  key.replaceChildren();
+  for (const a of [...b.ablocks.keys()].sort()) {
+    const s = document.createElement("span");
+    const i = document.createElement("i"); i.className = "line-key"; i.style.background = `var(${seriesVar(a)})`;
+    s.append(i, document.createTextNode(`${a}까지 거리`));
+    key.appendChild(s);
+  }
+  const ref = document.createElement("span");
+  const ri = document.createElement("i"); ri.className = "line-key thin"; ri.style.background = "var(--ink-2)";
+  ref.append(ri, document.createTextNode("얇은 선 = 실제 거리 (앵커 색)"));
+  const x = document.createElement("span");
+  const xb = document.createElement("b"); xb.className = "x-key"; xb.textContent = "×";
+  x.append(xb, document.createTextNode("측정 실패 (앵커별 줄)"));
+  key.append(ref, x);
 }
 
 function renderHead(b) {
   const { el, state: st } = b;
   el.dataset.label = st.label;
   $(el, ".label").textContent = st.label;
-  $(el, ".fw").textContent = FW_NAME[st.firmware] || st.firmware;
-  $(el, ".port").textContent = st.port + (st.sn && st.sn !== "?" ? "  ·  고유번호 " + st.sn : "");
+  $(el, ".fw").textContent = (FW_NAME[st.firmware] || st.firmware) + (st.node_id ? " " + st.node_id : "");
+  $(el, ".port").textContent = st.port + (st.sn && st.sn !== "?" ? "  ·  고유번호 " + st.sn : "") +
+    (st.mac ? "  ·  MAC " + st.mac : "");
   const [kind, text] = STATUS[st.status] || ["", st.status];
   $(el, ".status .dot").className = "dot " + kind;
   $(el, ".status-text").textContent = text;
@@ -404,6 +453,10 @@ function renderHead(b) {
   if (st.status === "live" && (st.firmware === "factory" || st.firmware === "unknown")) $(el, ".log-details").open = true;
 }
 
+function counts(n_ok) {
+  return Object.keys(n_ok || {}).sort().map(a => `${a} ${n_ok[a]}`).join(" · ");
+}
+
 function renderRecord(b) {
   const { el, state: st } = b;
   const rec = st.record;
@@ -411,23 +464,28 @@ function renderRecord(b) {
   btn.textContent = rec ? "기록 정지" : "기록 시작";
   btn.classList.toggle("primary", !rec);
   $(el, ".rec-cond").disabled = $(el, ".rec-n").disabled = !!rec;
+  for (const blk of b.ablocks.values()) $(blk, ".truth-in").disabled = !!rec;
   const p = $(el, ".progress");
   if (rec) {
-    p.textContent = `기록 중 ${rec.n_ok}/${rec.target} (시도 ${rec.n_all}) → ${rec.path}`;
+    p.textContent = `기록 중 ${counts(rec.n_ok) || "0"} / 목표 ${rec.target}개씩 (시도 ${rec.n_all}) → ${rec.path}`;
   } else if (b.lastSaved) {
     const s = b.lastSaved;
     const why = { done: "완료", stopped: "정지", released: "포트 놓음", unplugged: "뽑힘", error: "오류" }[s.reason] || s.reason;
-    p.textContent = `저장됨 (${why}): ${s.path} · 성공 ${s.n_ok} / 시도 ${s.n_all}`;
+    p.textContent = `저장됨 (${why}): ${s.path} · 성공 ${counts(s.n_ok) || "0"} / 시도 ${s.n_all}`;
   } else {
-    p.textContent = "실제 거리를 적고 시작하면 진행 중인 실험 폴더(experiments/…/data/)에 CSV로 쌓인다.";
+    p.textContent = "앵커마다 실제 거리를 적고 시작하면 v3_uwb/data/에 CSV로 쌓인다.";
   }
 }
 
 async function toggleRecord(b) {
   if (b.state.record) return post("/api/record/stop", { port: b.state.port });
-  const truth = $(b.el, ".truth-in").value;
+  const truths = {};
+  for (const [a, blk] of b.ablocks) {
+    const v = $(blk, ".truth-in").value;
+    truths[a] = v === "" ? null : Number(v);
+  }
   await post("/api/record/start", {
-    port: b.state.port, true_m: truth === "" ? null : Number(truth),
+    port: b.state.port, truths,
     cond: $(b.el, ".rec-cond").value || "los", target: Number($(b.el, ".rec-n").value) || 300,
   });
 }
@@ -444,60 +502,62 @@ async function post(path, body) {
 }
 
 // ---------------- 통계 ----------------
-function stats(b) {
-  const s = b.samples;
-  const last = s.slice(-STAT_N);
-  const okDist = s.filter(x => x.ok).slice(-STAT_N).map(x => x.dist_m);
+function stats(samples) {
+  const last = samples.slice(-STAT_N);
+  const okDist = samples.filter(x => x.ok).slice(-STAT_N).map(x => x.dist_m);
   const mean = okDist.length ? okDist.reduce((a, v) => a + v, 0) / okDist.length : null;
   const sd = okDist.length > 1 ? Math.sqrt(okDist.reduce((a, v) => a + (v - mean) ** 2, 0) / okDist.length) : null;
-  const dfps = s.filter(x => x.ok && x.dfp != null).slice(-STAT_N).map(x => x.dfp);
-  const now = Date.now() / 1000;
-  const lastOk = [...s].reverse().find(x => x.ok);
+  const dfps = samples.filter(x => x.ok && x.dfp != null).slice(-STAT_N).map(x => x.dfp);
   return {
     mean, sd, nOk: okDist.length,
     rate: last.length ? last.filter(x => x.ok).length / last.length : null, nTry: last.length,
-    hz: s.filter(x => x.t > now - 5).length / 5,
     dfp: dfps.length ? dfps.reduce((a, v) => a + v, 0) / dfps.length : null,
-    lastOk, last: s[s.length - 1],
+    lastOk: [...samples].reverse().find(x => x.ok), last: samples[samples.length - 1],
   };
 }
 
 function renderTag(b) {
-  const el = b.el, st = stats(b);
-  const now = Date.now() / 1000;
-  const stale = !st.last || now - st.last.t > 2;
+  const el = b.el, now = Date.now() / 1000;
+  const last = b.samples[b.samples.length - 1];
+  const alert = $(el, ".alert");
+  alert.hidden = !!last && now - last.t <= STALE_S;
+  alert.textContent = "새 측정 없음 — 태그가 멈췄거나 연결을 확인";
 
-  $(el, ".cur").textContent = st.lastOk ? st.lastOk.dist_m.toFixed(3) : "—";
-  $(el, ".cur-label").textContent = stale
-    ? "새 측정 없음 — 태그가 멈췄거나 연결 확인"
-    : (st.last.ok ? "현재 거리" : `마지막 성공값 · 방금 실패 (${st.last.reason})`);
+  const truths = {};
+  for (const [a, blk] of b.ablocks) {
+    const s = b.samples.filter(x => x.anchor === a);
+    const st = stats(s);
+    const fresh = st.last && now - st.last.t <= STALE_S;
+    const freshOk = st.lastOk && now - st.lastOk.t <= STALE_S;
+    $(blk, ".a-cur").textContent = st.lastOk ? st.lastOk.dist_m.toFixed(3) : "—";
+    $(blk, ".astate").textContent = !fresh ? "응답 없음 — 꺼졌거나 멂 (1초마다 다시 물음)"
+      : freshOk ? (st.last.ok ? "응답 중" : `방금 실패 (${st.last.reason})`)
+      : `실패 중 (${st.last.reason})`;
+    $(blk, ".a-mean").textContent = st.mean == null ? "—" : `${st.mean.toFixed(3)} m`;
+    $(blk, ".a-sd").textContent = st.sd == null ? "—" : `± ${(st.sd * 100).toFixed(1)} cm`;
+    $(blk, ".a-rate").textContent = st.rate == null ? "—" : `${Math.round(st.rate * 100)}% / ${st.nTry}번`;
+    $(blk, ".a-dfp").textContent = st.dfp == null ? "—" : `${st.dfp.toFixed(1)} dB`;
+    const truth = parseFloat($(blk, ".truth-in").value);
+    truths[a] = truth;
+    $(blk, ".a-err").textContent = !Number.isNaN(truth) && st.mean != null
+      ? `평균 오차 ${signed((st.mean - truth) * 100)} cm` : "";
+  }
 
-  const truth = parseFloat($(el, ".truth-in").value);
-  $(el, ".err").textContent = !Number.isNaN(truth) && st.mean != null
-    ? `평균 오차 ${(st.mean - truth >= 0 ? "+" : "")}${((st.mean - truth) * 100).toFixed(1)} cm` : "";
+  const recent = b.samples.filter(x => x.t > now - 5);
+  const lastOk = [...b.samples].reverse().find(x => x.ok);
+  $(el, ".t-meta").textContent = `측정 ${(recent.length / 5).toFixed(1)}회/초 (앵커 전체, 최근 5초)` +
+    (lastOk ? ` · 시계 차이 ${fmt(lastOk.clk_ppm, 2)} ppm · RX−FP 기준값은 아직 안 정함` : "");
 
-  $(el, ".t-mean").textContent = st.mean == null ? "—" : `${st.mean.toFixed(3)} m`;
-  $(el, ".t-sd").textContent = st.sd == null ? `최근 성공 ${st.nOk || 50}개`
-    : `± ${(st.sd * 100).toFixed(1)} cm · 성공 ${st.nOk}개`;
-  $(el, ".t-rate").textContent = st.rate == null ? "—" : `${Math.round(st.rate * 100)}%`;
-  $(el, ".t-rate-sub").textContent = st.nTry ? `최근 시도 ${st.nTry}개` : "최근 시도 50개";
-  $(el, ".t-hz").textContent = `${st.hz.toFixed(1)} Hz`;
-  $(el, ".t-dfp").textContent = st.dfp == null ? "—" : `${st.dfp.toFixed(1)} dB`;
-  const lo = st.lastOk;
-  $(el, ".t-meta").textContent = lo
-    ? `RX ${fmt(lo.rx, 1)} dBm · FP ${fmt(lo.fp, 1)} dBm · 시계 오차 ${fmt(lo.clk_ppm, 2)} ppm · LOS/NLOS 기준값은 실험 1에서 정함`
-    : "";
-
-  drawChart(b, truth);
+  drawChart(b, truths);
   if ($(el, ".table-details").open) renderTable(b);
 }
 
 function renderTable(b) {
   const tb = $(b.el, "tbody");
   const now = Date.now() / 1000;
-  const rows = b.samples.slice(-12).reverse().map(s => {
+  const rows = b.samples.slice(-14).reverse().map(s => {
     const tr = document.createElement("tr");
-    const cells = [`${(now - s.t).toFixed(1)}초 전`, s.ok ? "성공" : `실패 (${s.reason})`,
+    const cells = [`${(now - s.t).toFixed(1)}초 전`, s.anchor || "—", s.ok ? "성공" : `실패 (${s.reason})`,
       s.ok ? s.dist_m.toFixed(3) : "—", s.ok ? fmt(s.dfp, 1) : "—", s.ok ? fmt(s.rx, 1) : "—"];
     for (const c of cells) { const td = document.createElement("td"); td.textContent = c; tr.appendChild(td); }
     return tr;
@@ -510,8 +570,8 @@ function renderAnchor(b) {
   const fresh = a && now - a.t < 3;
   $(b.el, ".replies").textContent = fresh ? String(a.replies) : "0";
   $(b.el, ".replies-label").textContent = fresh
-    ? "태그의 요청에 응답한 횟수 (태그가 10 Hz면 약 10)"
-    : "응답 없음 — 태그가 꺼져 있거나, 멀거나, 펌웨어 짝이 안 맞음";
+    ? `태그의 요청에 응답한 횟수${a.detail ? " — " + a.detail : ""} (태그 하나가 10회/초)`
+    : "응답 없음 — 태그가 꺼져 있거나, 멀거나, 태그 코드의 ANCHORS에 이 번호가 없음";
 }
 
 // ---------------- 그래프 ----------------
@@ -525,7 +585,7 @@ function niceStep(range) {
   return steps.find(s => range / s <= 5) || 10;
 }
 
-function drawChart(b, truth) {
+function drawChart(b, truths) {
   const cv = $(b.el, "canvas");
   const dpr = window.devicePixelRatio || 1;
   const W = cv.clientWidth, H = cv.clientHeight;
@@ -538,22 +598,25 @@ function drawChart(b, truth) {
   g.clearRect(0, 0, W, H);
 
   const C = { surface: css("--surface"), ink2: css("--ink-2"), ink3: css("--ink-3"), grid: css("--grid"),
-    axis: css("--axis"), series: css("--series"), wash: css("--series-wash"), crit: css("--critical") };
+    axis: css("--axis"), crit: css("--critical") };
+  const anchors = [...b.ablocks.keys()].sort();
+  const color = a => css(seriesVar(a));
+  const FAIL_ROW = 12;                                  // 앵커마다 실패 표시 줄 높이
+  const failH = FAIL_ROW * Math.max(anchors.length, 1);
   const pad = { l: 52, r: 12, t: 10, b: 34 };
   const pw = W - pad.l - pad.r, ph = H - pad.t - pad.b;
-  const failY = pad.t + ph - 6;           // 실패 표시 줄 (그래프 맨 아래)
   const now = Date.now() / 1000;
   const xOf = t => pad.l + (1 - (now - t) / WINDOW_S) * pw;
+  const failY = a => pad.t + ph - failH + FAIL_ROW * anchors.indexOf(a) + FAIL_ROW / 2;
 
   const vis = visibleSamples(b);
-  const ok = vis.filter(s => s.ok);
-  const vals = ok.map(s => s.dist_m);
-  if (!Number.isNaN(truth)) vals.push(truth);
+  const vals = vis.filter(s => s.ok).map(s => s.dist_m);
+  for (const a of anchors) if (!Number.isNaN(truths[a])) vals.push(truths[a]);
 
   g.font = "11px system-ui, -apple-system, sans-serif";
   g.textBaseline = "middle";
 
-  // y 범위 — 데이터에 맞춰 늘고 준다
+  // y 범위 — 데이터에 맞춰 늘고 준다 (축은 하나: 모든 앵커가 같은 m 단위)
   let lo, hi;
   if (vals.length) {
     lo = Math.min(...vals); hi = Math.max(...vals);
@@ -562,7 +625,7 @@ function drawChart(b, truth) {
   } else { lo = 0; hi = 1; }
   const step = niceStep(hi - lo);
   lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
-  const yOf = v => pad.t + (1 - (v - lo) / (hi - lo)) * (ph - 14);   // 아래 14px은 실패 표시 자리
+  const yOf = v => pad.t + (1 - (v - lo) / (hi - lo)) * (ph - failH - 12);   // 12px: 눈금 글자와 실패 줄 이름이 붙지 않게
   const dec = step < 0.01 ? 3 : step < 0.1 ? 2 : 1;
 
   // 격자 + y 눈금
@@ -573,6 +636,8 @@ function drawChart(b, truth) {
     g.strokeStyle = C.grid; g.beginPath(); g.moveTo(pad.l, y); g.lineTo(pad.l + pw, y); g.stroke();
     g.fillText(v.toFixed(dec), pad.l - 8, y);
   }
+  // 실패 줄 이름 (A1, A2)
+  for (const a of anchors) g.fillText(a, pad.l - 8, failY(a));
   // x 축 + 눈금
   g.strokeStyle = C.axis;
   g.beginPath(); g.moveTo(pad.l, pad.t + ph + 0.5); g.lineTo(pad.l + pw, pad.t + ph + 0.5); g.stroke();
@@ -582,67 +647,87 @@ function drawChart(b, truth) {
   }
   g.textBaseline = "middle";
 
-  // 실제 거리 기준선 — 값은 입력칸·범례에 있으므로 선 위에 글자를 얹지 않음 (측정선과 겹침)
-  if (!Number.isNaN(truth) && truth >= lo && truth <= hi) {
-    const y = Math.round(yOf(truth)) + 0.5;
-    g.strokeStyle = C.ink2; g.beginPath(); g.moveTo(pad.l, y); g.lineTo(pad.l + pw, y); g.stroke();
-  }
-
-  // 거리 선 — 0.6초 넘게 비면 끊는다 (실패 구간을 선으로 메우지 않음)
-  g.save();
-  g.beginPath(); g.rect(pad.l, pad.t, pw, ph); g.clip();
-  g.strokeStyle = C.series; g.lineWidth = 2; g.lineJoin = "round"; g.lineCap = "round";
-  g.beginPath();
-  let prev = null;
-  for (const s of ok) {
-    const x = xOf(s.t), y = yOf(s.dist_m);
-    if (!prev || s.t - prev.t > 0.6) g.moveTo(x, y); else g.lineTo(x, y);
-    prev = s;
-  }
-  g.stroke();
-  // 끝점
-  if (ok.length) {
-    const e = ok[ok.length - 1];
-    dot(g, xOf(e.t), yOf(e.dist_m), C.series, C.surface);
+  // 실제 거리 기준선 — 앵커 색의 얇은 선. 값은 칸의 입력값에 있으므로 글자를 얹지 않음
+  g.save(); g.globalAlpha = 0.7;
+  for (const a of anchors) {
+    const t = truths[a];
+    if (Number.isNaN(t) || t < lo || t > hi) continue;
+    const y = Math.round(yOf(t)) + 0.5;
+    g.strokeStyle = color(a); g.beginPath(); g.moveTo(pad.l, y); g.lineTo(pad.l + pw, y); g.stroke();
   }
   g.restore();
 
-  // 실패 표시
-  g.strokeStyle = C.crit; g.lineWidth = 1.5;
-  for (const s of vis) {
-    if (s.ok) continue;
-    const x = xOf(s.t);
-    g.beginPath(); g.moveTo(x - 3, failY - 3); g.lineTo(x + 3, failY + 3);
-    g.moveTo(x + 3, failY - 3); g.lineTo(x - 3, failY + 3); g.stroke();
-  }
-
-  // 십자선 + 툴팁
-  const tip = $(b.el, ".tooltip");
-  let h = null;
-  if (b.hover && vis.length) {
-    if (b.hover.x != null) {
-      const tAt = now - (1 - (b.hover.x - pad.l) / pw) * WINDOW_S;
-      let best = 0;
-      vis.forEach((s, i) => { if (Math.abs(s.t - tAt) < Math.abs(vis[best].t - tAt)) best = i; });
-      h = vis[best];
-    } else if (b.hover.idx != null) {
-      b.hover.idx = Math.min(b.hover.idx, vis.length - 1);
-      h = vis[b.hover.idx];
+  // 앵커별 거리 선 — 0.6초 넘게 비면 끊는다 (실패 구간을 선으로 메우지 않음)
+  g.save();
+  g.beginPath(); g.rect(pad.l, pad.t, pw, ph - failH); g.clip();
+  g.lineWidth = 2; g.lineJoin = "round"; g.lineCap = "round";
+  for (const a of anchors) {
+    const ok = vis.filter(s => s.ok && s.anchor === a);
+    g.strokeStyle = color(a);
+    g.beginPath();
+    let prev = null;
+    for (const s of ok) {
+      const x = xOf(s.t), y = yOf(s.dist_m);
+      if (!prev || s.t - prev.t > 0.6) g.moveTo(x, y); else g.lineTo(x, y);
+      prev = s;
+    }
+    g.stroke();
+    if (ok.length) {
+      const e = ok[ok.length - 1];
+      dot(g, xOf(e.t), yOf(e.dist_m), color(a), C.surface);
     }
   }
-  if (h) {
-    const x = Math.round(xOf(h.t)) + 0.5;
+  g.restore();
+
+  // 실패 표시 — 앵커마다 한 줄
+  g.strokeStyle = C.crit; g.lineWidth = 1.5;
+  for (const s of vis) {
+    if (s.ok || !anchors.includes(s.anchor)) continue;
+    const x = xOf(s.t), y = failY(s.anchor);
+    g.beginPath(); g.moveTo(x - 3, y - 3); g.lineTo(x + 3, y + 3);
+    g.moveTo(x + 3, y - 3); g.lineTo(x - 3, y + 3); g.stroke();
+  }
+
+  // 십자선 + 툴팁 — 그 시점의 앵커별 값을 한꺼번에 보여 준다
+  const tip = $(b.el, ".tooltip");
+  let tAt = null;
+  if (b.hover && vis.length) {
+    if (b.hover.x != null) {
+      tAt = now - (1 - (b.hover.x - pad.l) / pw) * WINDOW_S;
+    } else if (b.hover.idx != null) {
+      b.hover.idx = Math.min(b.hover.idx, vis.length - 1);
+      tAt = vis[b.hover.idx].t;
+    }
+  }
+  if (tAt != null) {
+    // 앵커마다 그 시점에 가장 가까운 측정 (0.3초 안)
+    const near = [];
+    for (const a of anchors) {
+      let best = null;
+      for (const s of vis) if (s.anchor === a && (!best || Math.abs(s.t - tAt) < Math.abs(best.t - tAt))) best = s;
+      if (best && Math.abs(best.t - tAt) <= 0.3) near.push(best);
+    }
+    if (!near.length) { tip.style.display = "none"; return; }
+    const tx = Math.round(xOf(near[0].t)) + 0.5;
     g.strokeStyle = C.axis; g.lineWidth = 1;
-    g.beginPath(); g.moveTo(x, pad.t); g.lineTo(x, pad.t + ph); g.stroke();
-    if (h.ok) dot(g, x, yOf(h.dist_m), C.series, C.surface);
-    $(tip, "strong").textContent = h.ok ? `${h.dist_m.toFixed(3)} m` : `실패 · ${h.reason}`;
-    $(tip, "span").textContent = `${(now - h.t).toFixed(1)}초 전` + (h.ok && h.dfp != null ? ` · RX−FP ${h.dfp.toFixed(1)} dB` : "");
+    g.beginPath(); g.moveTo(tx, pad.t); g.lineTo(tx, pad.t + ph); g.stroke();
+    const rows = near.map(s => {
+      if (s.ok) dot(g, xOf(s.t), yOf(s.dist_m), color(s.anchor), C.surface);
+      const r = document.createElement("div"); r.className = "trow";
+      const k = document.createElement("i"); k.className = "line-key"; k.style.background = color(s.anchor);
+      const v = document.createElement("strong"); v.textContent = s.ok ? `${s.dist_m.toFixed(3)} m` : "실패";
+      const n = document.createElement("span");
+      n.textContent = s.anchor + (s.ok ? (s.dfp != null ? ` · RX−FP ${s.dfp.toFixed(1)} dB` : "") : ` · ${s.reason}`);
+      r.append(k, v, n);
+      return r;
+    });
+    $(tip, ".trows").replaceChildren(...rows);
+    $(tip, ".ttime").textContent = `${(now - near[0].t).toFixed(1)}초 전`;
     tip.style.display = "block";
     const tw = tip.offsetWidth;
-    const left = x + 12 + tw > W ? x - 12 - tw : x + 12;
-    const y = h.ok ? yOf(h.dist_m) : failY;
+    const left = tx + 12 + tw > W ? tx - 12 - tw : tx + 12;
     tip.style.left = `${cv.offsetLeft + left}px`;   // 툴팁은 .chart 기준, 그래프는 제목 아래에 있음
-    tip.style.top = `${cv.offsetTop + Math.max(0, Math.min(H - tip.offsetHeight, y - tip.offsetHeight / 2))}px`;
+    tip.style.top = `${cv.offsetTop + Math.max(0, (H - tip.offsetHeight) / 2 - 20)}px`;
   } else {
     tip.style.display = "none";
   }
@@ -664,7 +749,6 @@ setInterval(() => {
       $(b.el, ".log").textContent = b.logLines.join("\n");
       b.logDirty = false;
     }
-    b.dirty = false;
   }
 }, 100);
 
