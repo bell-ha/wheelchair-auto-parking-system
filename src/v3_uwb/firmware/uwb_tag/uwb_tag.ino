@@ -1,10 +1,10 @@
 /*
  * uwb_tag — SS-TWR 개시자(태그). 앵커(uwb_anchor)에 poll을 보내고, 응답에 담긴 타임스탬프로 거리를 계산한다.
- * PC에 USB로 연결해 tools/log_range.py로 기록한다.
+ * PC에 USB로 연결해 tools/live_view.py로 보고 기록한다.
  *
  * 출처: Makerfabs-ESP32-UWB-DW3000 example/range/range_rx (Qorvo ex_06a 기반)
  * 바꾼 것:
- *   - "DIST: x.xx m" 대신 한 줄 CSV로 출력 → log_range.py가 그대로 저장
+ *   - "DIST: x.xx m" 대신 한 줄 CSV로 출력 → live_view.py가 그대로 저장
  *   - 수신 진단값(C, F1~F3, N, D)을 원시값으로 출력. dBm 환산과 NLOS 판정은 PC에서 한다
  *     (공식이 틀렸으면 재업로드 없이 tools/만 고치면 된다)
  *   - 실패(타임아웃·수신오류·엉뚱한 프레임)도 한 줄씩 남김 → 차체에 가렸을 때 성공률을 잴 수 있다

@@ -10,8 +10,10 @@
 
 새로 꽂은 보드는 2초 안에 자동으로 카드가 생긴다. 포트를 열 때 보드가 재부팅된다(부팅 메시지로 펌웨어 판별).
 
+기록: 카드의 '기록' → experiments/<진행 중인 실험>/data/ 에 CSV (위치는 lib/uwb_proto.py의 RECORD_DIR)
+
 포트는 한 프로그램만 잡을 수 있다:
-  - 이 서버가 도는 동안 log_range.py는 못 쓴다 → 대신 카드의 '기록'을 쓴다 (같은 CSV 형식, data/range/)
+  - Arduino 시리얼 모니터와 동시에 열면 충돌한다
   - 펌웨어 업로드 전에는 카드의 '포트 놓기'를 누르고, 끝나면 '다시 잡기'
 
 127.0.0.1에만 열린다 (같은 와이파이의 다른 기기에서는 안 보임).
@@ -30,10 +32,10 @@ from pathlib import Path
 
 import serial
 
-from uwb_proto import CSV_FIELDS, find_ports, levels, open_and_reset, parse_line, range_csv_path
+from lib.uwb_proto import CSV_FIELDS, V3_DIR, find_ports, levels, open_and_reset, parse_line, record_csv_path
 
 HERE = Path(__file__).resolve().parent
-PAGE = HERE / "live_view.html"
+PAGE = HERE / "lib" / "live_view.html"
 SCAN_INTERVAL = 2.0
 STALL_S = 3.0   # 태그는 10 Hz로 쉬지 않고 출력하므로 이만큼 조용하면 USB 쪽이 멈춘 것
 
@@ -86,11 +88,11 @@ class Hub:
 
 
 class Recorder:
-    """카드의 '기록' — log_range.py와 같은 CSV를 data/range/에 남긴다."""
+    """카드의 '기록' — 진행 중인 실험 폴더의 data/에 CSV를 남긴다 (analyze.py가 읽는 형식)."""
 
     def __init__(self, true_m, cond, target):
         self.true_m, self.cond, self.target = true_m, cond, target
-        self.path = range_csv_path(cond, true_m)
+        self.path = record_csv_path(cond, true_m)
         self.f = open(self.path, "w", newline="")
         self.w = csv.DictWriter(self.f, fieldnames=CSV_FIELDS, extrasaction="ignore")
         self.w.writeheader()
@@ -111,7 +113,7 @@ class Recorder:
         self.f.close()
 
     def state(self):
-        return {"path": str(self.path.relative_to(HERE.parent)), "n_ok": self.n_ok,
+        return {"path": str(self.path.relative_to(V3_DIR)), "n_ok": self.n_ok,
                 "n_all": self.n_all, "target": self.target,
                 "true_m": self.true_m, "cond": self.cond}
 

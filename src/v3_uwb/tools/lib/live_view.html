@@ -419,7 +419,7 @@ function renderRecord(b) {
     const why = { done: "완료", stopped: "정지", released: "포트 놓음", unplugged: "뽑힘", error: "오류" }[s.reason] || s.reason;
     p.textContent = `저장됨 (${why}): ${s.path} · 성공 ${s.n_ok} / 시도 ${s.n_all}`;
   } else {
-    p.textContent = "실제 거리를 적고 시작하면 log_range.py와 같은 CSV가 data/range/에 쌓인다.";
+    p.textContent = "실제 거리를 적고 시작하면 진행 중인 실험 폴더(experiments/…/data/)에 CSV로 쌓인다.";
   }
 }
 

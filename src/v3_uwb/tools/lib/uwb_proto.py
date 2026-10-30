@@ -1,6 +1,6 @@
 """공용 UWB 계층 — 보드 연결, firmware/uwb_tag 출력 형식, 진단값 환산 "한 벌".
 
-check_board.py(점검)·log_range.py(기록)·analyze_range.py(분석)가 이 모듈을 같이 쓴다.
+tools/live_view.py(실행·기록)와 tools/analyze.py(분석)가 이 모듈을 같이 쓴다. 직접 실행하는 파일이 아니다.
 펌웨어 출력 형식이 바뀌면 uwb_tag.ino와 여기 두 곳만 맞추면 됨.
 
 보드 연결:
@@ -40,17 +40,20 @@ BAUD = 115200
 A_PRF64 = 121.7
 F_SCALE = 4.0   # F1~F3 소수부 2비트
 
-# 측정 기록 CSV 열 순서 (log_range.py·live_view.py가 쓰고 analyze_range.py가 이 이름으로 읽는다)
+# 측정 기록 CSV 열 순서 (live_view.py가 쓰고 analyze.py가 이 이름으로 읽는다)
 CSV_FIELDS = ["t_pc", "ms", "seq", "ok", "dist_m", "clk_ppm",
               "C", "F1", "F2", "F3", "N", "D", "reason", "true_m", "cond"]
-RANGE_DIR = Path(__file__).resolve().parent.parent / "data" / "range"
+
+# 기록이 쌓이는 곳 = 지금 진행 중인 실험 폴더. 새 실험을 시작하면 여기만 바꾼다
+V3_DIR = Path(__file__).resolve().parents[2]
+RECORD_DIR = V3_DIR / "experiments" / "01_거리정확도" / "data"
 
 
-def range_csv_path(cond, true_m):
-    """data/range/<시각>_<cond>_<true>m.csv — 폴더가 없으면 만든다."""
-    RANGE_DIR.mkdir(parents=True, exist_ok=True)
+def record_csv_path(cond, true_m):
+    """<실험>/data/<시각>_<cond>_<true>m.csv — 폴더가 없으면 만든다."""
+    RECORD_DIR.mkdir(parents=True, exist_ok=True)
     true_tag = f"{true_m:.2f}m" if true_m is not None else "free"
-    return RANGE_DIR / f"{datetime.now():%Y%m%d_%H%M%S}_{cond}_{true_tag}.csv"
+    return RECORD_DIR / f"{datetime.now():%Y%m%d_%H%M%S}_{cond}_{true_tag}.csv"
 
 
 def find_ports():

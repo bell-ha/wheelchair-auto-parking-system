@@ -236,6 +236,6 @@ cd jetson_nano && python3 main.py
 | [세그멘테이션 실험](src/v2_vision/seg_experiment/RESULTS.md) | 대안 검토 |
 | [V1 전체 정리](src/v1_aroundview/NOTES.md) | 8단계 파이프라인 |
 | [V3 UWB](src/v3_uwb/README.md) | 보드 · 펌웨어 · 측정 도구 · 실험 계획 |
-| [UWB 원리 정리](src/v3_uwb/UWB_원리_정리.md) | TWR · 높이 차이 · 오차 원인 |
+| [UWB 원리 정리](src/v3_uwb/docs/원리.txt) | TWR · 높이 차이 · 오차 원인 |
 | [발표자료](files/) | 0301 · 0821 · 0901 |
 | [프로젝트 소개 페이지](https://bell-ha.github.io/projects/wheelchair-parking/) | 요약 · 도면 · 데모 |
