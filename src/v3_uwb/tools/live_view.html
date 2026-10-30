@@ -126,6 +126,20 @@
   .chart { position: relative; margin-top: 14px; }
   .chart-title { font-size: 13px; color: var(--ink-2); margin-bottom: 4px; }
   .chart canvas { display: block; width: 100%; height: 200px; border-radius: 6px; }
+  /* 위에서 본 지도 */
+  .map { margin-top: 14px; }
+  .map canvas { display: block; width: 100%; height: 340px; border-radius: 8px; background: var(--page); cursor: crosshair; }
+  .map-read { margin: 6px 0 0; font-size: 13px; color: var(--ink-1); }
+  .map-read .cursor { color: var(--ink-3); font-size: 12px; margin-left: 8px; }
+  .pos-grid { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 6px; font-size: 12px; color: var(--ink-2); }
+  .pos-grid label { display: inline-flex; align-items: center; gap: 4px; }
+  .pos-grid input { width: 64px; }
+  .hint { color: var(--ink-3); font-size: 12px; margin: 6px 0 0; }
+  .survey { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 12px; font-size: 13px; color: var(--ink-2); }
+  .survey-list { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 12px; color: var(--ink-1); font-variant-numeric: tabular-nums; }
+  .key .sq { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+  .key .ring { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--ink-3); flex: none; }
+  .key .pt { width: 9px; height: 9px; border-radius: 50%; background: var(--ink-1); flex: none; }
   .key { display: flex; flex-wrap: wrap; gap: 14px; color: var(--ink-2); font-size: 12px; margin-top: 4px; }
   .key span { display: inline-flex; align-items: center; gap: 6px; }
   .key .thin { height: 1px; opacity: 0.7; }
@@ -145,6 +159,12 @@
   .hero-value { font-size: 52px; font-weight: 600; line-height: 1; letter-spacing: -0.02em; }
   .hero-value .unit { font-size: 20px; font-weight: 500; color: var(--ink-2); margin-left: 4px; letter-spacing: 0; }
   .hero-label { color: var(--ink-2); font-size: 13px; margin-top: 6px; }
+
+  /* 앵커가 태그 결과까지 보여 줄 때는 응답 수를 한 줄로 작게 */
+  .anchor-view.compact { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin-bottom: 12px; }
+  .anchor-view.compact .hero-value { font-size: 20px; }
+  .anchor-view.compact .hero-value .unit { font-size: 13px; }
+  .anchor-view.compact .hero-label { margin: 0; }
 
   .message { color: var(--ink-2); background: var(--page); border-radius: 8px; padding: 12px; margin: 0; }
   .message strong { color: var(--ink-1); }
@@ -189,10 +209,33 @@
       <span class="port" style="flex-basis:100%"></span>
     </header>
 
+    <section class="anchor-view" hidden>
+      <div class="hero-value"><span class="replies">—</span><span class="unit">회/초</span></div>
+      <div class="hero-label replies-label">태그의 요청에 응답한 횟수</div>
+    </section>
+
+    <div class="survey" hidden>
+      <button class="survey-btn" type="button">앵커끼리 거리 재기</button>
+      <span class="survey-status">앵커 사이 거리를 재서 지도의 앵커 위치를 자동으로 채운다 (2~3초)</span>
+      <div class="survey-list"></div>
+    </div>
+
     <section class="tag-view" hidden>
       <p class="alert" hidden></p>
       <div class="anchors"></div>
       <p class="meta t-meta"></p>
+
+      <div class="map">
+        <div class="chart-title">위에서 본 모습 · 원 = 앵커에서 잰 거리, 원이 만나는 곳 = 태그</div>
+        <canvas aria-label="앵커 위치와 거리 원, 추정한 태그 위치를 위에서 본 그림"></canvas>
+        <p class="map-read"><span class="main"></span><span class="cursor"></span></p>
+        <div class="key"></div>
+        <details class="map-setup">
+          <summary>앵커 위치 입력 (m, 줄자로 잰 값)</summary>
+          <div class="pos-grid"></div>
+          <p class="hint">이 브라우저에 저장된다. 위에서 본 2D라 높이 차이는 무시한다 (높이가 다르면 원이 실제보다 크다).</p>
+        </details>
+      </div>
 
       <div class="chart">
         <div class="chart-title">앵커까지 거리 · 최근 30초</div>
@@ -218,11 +261,6 @@
           </table>
         </div>
       </details>
-    </section>
-
-    <section class="anchor-view" hidden>
-      <div class="hero-value"><span class="replies">—</span><span class="unit">회/초</span></div>
-      <div class="hero-label replies-label">태그의 요청에 응답한 횟수</div>
     </section>
 
     <p class="message other-msg" hidden></p>
@@ -304,6 +342,8 @@ function handle(ev) {
     const cut = Date.now() / 1000 - KEEP_S;
     while (b.samples.length && b.samples[0].t < cut) b.samples.shift();
     ensureAnchor(b, ev.anchor);
+    // 앵커 카드에 태그 결과가 처음 들어오면 거리 화면을 펼친다
+    if (b.state.firmware === "anchor" && $(b.el, ".tag-view").hidden) renderHead(b);
   } else if (ev.type === "anchor") {
     const b = boards.get(ev.port); if (!b) return;
     b.anchor = ev;
@@ -313,6 +353,18 @@ function handle(ev) {
     if (b.logLines.length > 40) b.logLines.shift();
     b.logDirty = true;
     if (b.state.firmware === "unknown") renderHead(b);   // 안내 문구가 로그 내용에 따라 달라짐
+  } else if (ev.type === "survey") {
+    const b = boards.get(ev.port); if (!b) return;
+    b.surveyPairs = b.surveyPairs || {};
+    b.surveyPairs[[ev.from, ev.to].sort().join("-")] = ev;
+    renderSurvey(b);
+  } else if (ev.type === "survey_status") {
+    const b = boards.get(ev.port); if (!b) return;
+    const noAns = ev.text.match(/^survey (\S+) no answer/);
+    if (ev.text.startsWith("survey start")) { b.surveyPairs = {}; b.surveyWarn = []; b.surveyMsg = "측량 중…"; }
+    else if (noAns) (b.surveyWarn = b.surveyWarn || []).push(`${noAns[1]}가 결과를 보내지 않음 (전원·펌웨어 확인)`);
+    else if (ev.text.startsWith("survey done")) b.surveyMsg = applySurvey(b);
+    renderSurvey(b);
   } else if (ev.type === "record") {
     const b = boards.get(ev.port); if (!b) return;
     b.state.record = ev; renderRecord(b);
@@ -325,7 +377,8 @@ function handle(ev) {
 function upsert(st) {
   let b = boards.get(st.port);
   if (!b) {
-    b = { state: st, samples: [], anchor: null, logLines: [], hover: null, logDirty: true, ablocks: new Map() };
+    b = { state: st, samples: [], anchor: null, logLines: [], hover: null, logDirty: true, ablocks: new Map(),
+          track: [], mapHover: null };
     b.el = buildCard(b);
     boards.set(st.port, b);
     const list = document.getElementById("boards");
@@ -348,8 +401,13 @@ function buildCard(b) {
   $(el, ".hold").addEventListener("click", () =>
     post(b.state.status === "released" ? "/api/attach" : "/api/release", { port: b.state.port }));
   $(el, ".rec-btn").addEventListener("click", () => toggleRecord(b));
+  $(el, ".survey-btn").addEventListener("click", () => {
+    b.surveyPairs = {}; b.surveyWarn = []; b.surveyMsg = "측량 요청 보냄…";
+    renderSurvey(b);
+    post("/api/survey", { port: b.state.port });
+  });
 
-  const cv = $(el, "canvas");
+  const cv = $(el, ".chart canvas");
   cv.addEventListener("pointermove", e => {
     const r = cv.getBoundingClientRect();
     b.hover = { x: e.clientX - r.left, idx: null };
@@ -365,6 +423,12 @@ function buildCard(b) {
     i = Math.max(0, Math.min(vis.length - 1, i + (e.key === "ArrowLeft" ? -1 : 1)));
     b.hover = { idx: i, x: null };
   });
+  const mv = $(el, ".map canvas");
+  mv.addEventListener("pointermove", e => {
+    const r = mv.getBoundingClientRect();
+    b.mapHover = { x: e.clientX - r.left, y: e.clientY - r.top };
+  });
+  mv.addEventListener("pointerleave", () => { b.mapHover = null; });
   return el;
 }
 
@@ -380,7 +444,7 @@ function ensureAnchor(b, anchor) {
   box.appendChild(blk);
   [...box.children].sort((x, y) => x.dataset.anchor.localeCompare(y.dataset.anchor)).forEach(n => box.appendChild(n));
 
-  const key = $(b.el, ".key");
+  const key = $(b.el, ".chart .key");
   key.replaceChildren();
   for (const a of [...b.ablocks.keys()].sort()) {
     const s = document.createElement("span");
@@ -395,6 +459,55 @@ function ensureAnchor(b, anchor) {
   const xb = document.createElement("b"); xb.className = "x-key"; xb.textContent = "×";
   x.append(xb, document.createTextNode("측정 실패 (앵커별 줄)"));
   key.append(ref, x);
+
+  // 앵커 위치 입력칸 (번호 순서)
+  const grid = $(b.el, ".pos-grid");
+  grid.replaceChildren();
+  for (const a of [...b.ablocks.keys()].sort()) {
+    const lab = document.createElement("label");
+    const k = document.createElement("i"); k.className = "sq"; k.style.background = `var(${seriesVar(a)})`;
+    lab.append(k, document.createTextNode(` ${a}  x`));
+    for (const axis of [0, 1]) {
+      if (axis === 1) lab.append(document.createTextNode(" y"));
+      const inp = document.createElement("input");
+      inp.type = "number"; inp.step = "0.01";
+      inp.dataset.anchor = a; inp.dataset.axis = axis;
+      const pos = anchorPos[a];
+      if (pos) inp.value = pos[axis];
+      inp.addEventListener("input", () => {
+        const v = parseFloat(inp.value);
+        if (Number.isNaN(v)) return;
+        anchorPos[a] = anchorPos[a] ? anchorPos[a].slice() : [0, 0];
+        anchorPos[a][axis] = v;
+        savePos();
+        for (const ob of boards.values()) ob.track = [];   // 좌표가 바뀌면 지나온 자리는 의미가 없다
+      });
+      lab.append(inp);
+    }
+    grid.appendChild(lab);
+  }
+
+  // 지도 범례
+  const mk = $(b.el, ".map .key");
+  mk.replaceChildren();
+  for (const a of [...b.ablocks.keys()].sort()) {
+    const sp = document.createElement("span");
+    const sq = document.createElement("i"); sq.className = "sq"; sq.style.background = `var(${seriesVar(a)})`;
+    sp.append(sq, document.createTextNode(`${a} 위치와 거리 원`));
+    mk.appendChild(sp);
+  }
+  const est = document.createElement("span");
+  const pt = document.createElement("i"); pt.className = "pt";
+  est.append(pt, document.createTextNode("태그 추정 위치 (흐린 점 = 지나온 자리)"));
+  const cand = document.createElement("span");
+  const rg = document.createElement("i"); rg.className = "ring";
+  cand.append(rg, document.createTextNode("앵커가 2개뿐일 때의 후보"));
+  mk.append(est, cand);
+}
+
+/* 거리 화면을 보일 보드: 태그, 또는 태그의 방송(report)을 받아 전달하는 앵커 */
+function showsDistances(b) {
+  return b.state.firmware === "tag" || (b.state.firmware === "anchor" && b.samples.length > 0);
 }
 
 function renderHead(b) {
@@ -411,8 +524,10 @@ function renderHead(b) {
   $(el, ".hold").title = st.status === "released" ? "" : "펌웨어 업로드 전에 누른다";
 
   const live = st.status === "live";
-  $(el, ".tag-view").hidden = !(live && st.firmware === "tag");
+  $(el, ".tag-view").hidden = !(live && showsDistances(b));
   $(el, ".anchor-view").hidden = !(live && st.firmware === "anchor");
+  $(el, ".survey").hidden = !(live && st.firmware === "anchor");
+  $(el, ".anchor-view").classList.toggle("compact", st.firmware === "anchor" && b.samples.length > 0);
 
   const msg = $(el, ".other-msg");
   let m = null;
@@ -521,7 +636,9 @@ function renderTag(b) {
   const last = b.samples[b.samples.length - 1];
   const alert = $(el, ".alert");
   alert.hidden = !!last && now - last.t <= STALE_S;
-  alert.textContent = "새 측정 없음 — 태그가 멈췄거나 연결을 확인";
+  alert.textContent = b.state.firmware === "anchor"
+    ? "새 결과 없음 — 태그 전원과 거리를 확인 (태그 결과는 UWB로 이 앵커에 온다)"
+    : "새 측정 없음 — 태그가 멈췄거나 연결을 확인";
 
   const truths = {};
   for (const [a, blk] of b.ablocks) {
@@ -545,10 +662,12 @@ function renderTag(b) {
 
   const recent = b.samples.filter(x => x.t > now - 5);
   const lastOk = [...b.samples].reverse().find(x => x.ok);
-  $(el, ".t-meta").textContent = `측정 ${(recent.length / 5).toFixed(1)}회/초 (앵커 전체, 최근 5초)` +
+  const relayed = b.state.firmware === "anchor" && last ? `태그 ${last.tag}가 UWB로 보낸 결과 · ` : "";
+  $(el, ".t-meta").textContent = relayed + `측정 ${(recent.length / 5).toFixed(1)}회/초 (앵커 전체, 최근 5초)` +
     (lastOk ? ` · 시계 차이 ${fmt(lastOk.clk_ppm, 2)} ppm · RX−FP 기준값은 아직 안 정함` : "");
 
   drawChart(b, truths);
+  drawMap(b);
   if ($(el, ".table-details").open) renderTable(b);
 }
 
@@ -586,7 +705,7 @@ function niceStep(range) {
 }
 
 function drawChart(b, truths) {
-  const cv = $(b.el, "canvas");
+  const cv = $(b.el, ".chart canvas");
   const dpr = window.devicePixelRatio || 1;
   const W = cv.clientWidth, H = cv.clientHeight;
   if (!W || !H) return;
@@ -733,6 +852,174 @@ function drawChart(b, truths) {
   }
 }
 
+// ---------------- 앵커끼리 측량 ----------------
+function renderSurvey(b) {
+  const st = $(b.el, ".survey-status");
+  st.textContent = [b.surveyMsg, ...(b.surveyWarn || [])].filter(Boolean).join(" · ") ||
+    "앵커 사이 거리를 재서 지도의 앵커 위치를 자동으로 채운다 (2~3초)";
+  const list = $(b.el, ".survey-list");
+  list.replaceChildren(...Object.keys(b.surveyPairs || {}).sort().map(k => {
+    const e = b.surveyPairs[k];
+    const sp = document.createElement("span");
+    sp.textContent = e.n_ok > 0 ? `${k.replace("-", "–")}  ${e.dist_m.toFixed(3)} m (${e.n_ok}/${e.n_try})`
+      : `${k.replace("-", "–")}  실패 (0/${e.n_try})`;
+    return sp;
+  }));
+}
+
+/* A1-A2, A1-A3, A2-A3 거리 → 앵커 좌표. A1 원점, A2는 +x축, A3는 위쪽(+y) */
+function applySurvey(b) {
+  const get = k => { const e = (b.surveyPairs || {})[k]; return e && e.n_ok > 0 && e.dist_m > 0 ? e.dist_m : null; };
+  const d12 = get("A1-A2"), d13 = get("A1-A3"), d23 = get("A2-A3");
+  if (d12 == null || d13 == null || d23 == null) return "세 거리가 다 나오지 않아 앵커 위치를 계산하지 못했다";
+  const x = (d12 * d12 + d13 * d13 - d23 * d23) / (2 * d12);
+  const y2 = d13 * d13 - x * x;
+  if (y2 < -0.0025) return "세 거리로 삼각형이 안 만들어진다 — 어느 한 거리가 틀렸다 (가림·반사 확인)";
+  anchorPos.A1 = [0, 0];
+  anchorPos.A2 = [+d12.toFixed(3), 0];
+  anchorPos.A3 = [+x.toFixed(3), +Math.sqrt(Math.max(0, y2)).toFixed(3)];
+  savePos();
+  for (const inp of document.querySelectorAll(".pos-grid input")) {
+    const pos = anchorPos[inp.dataset.anchor];
+    if (pos) inp.value = pos[+inp.dataset.axis];
+  }
+  for (const ob of boards.values()) ob.track = [];
+  return "측량 끝 — 지도의 앵커 위치를 채웠다 (A1 원점, A2는 x축 위, A3는 위쪽)";
+}
+
+// ---------------- 위에서 본 지도 ----------------
+// 앵커 위치 (m). 줄자로 잰 값을 화면에서 입력 → 이 브라우저에 저장. 처음엔 2 m 삼각형으로 둔다
+const POS_KEY = "uwb.anchorPos";
+const anchorPos = Object.assign({ A1: [0, 0], A2: [2, 0], A3: [0, 2] }, (() => {
+  try { return JSON.parse(localStorage.getItem(POS_KEY)) || {}; } catch (e) { return {}; }
+})());
+function savePos() {
+  try { localStorage.setItem(POS_KEY, JSON.stringify(anchorPos)); } catch (e) { /* 저장 못 해도 화면은 동작 */ }
+}
+
+/* 앵커까지 최근 거리: 1.5초 안의 성공값 최근 5개의 중앙값 (튀는 값 하나에 원이 흔들리지 않게) */
+function recentRange(b, anchor) {
+  const now = Date.now() / 1000;
+  const d = b.samples.filter(s => s.anchor === anchor && s.ok && s.t > now - 1.5).slice(-5).map(s => s.dist_m).sort((x, y) => x - y);
+  return d.length ? d[Math.floor(d.length / 2)] : null;
+}
+
+/* 원 3개 이상: 원 방정식끼리 빼서 만든 직선 방정식을 최소제곱으로 푼다 */
+function solvePosition(pts) {
+  const [p0, ...rest] = pts;
+  let a11 = 0, a12 = 0, a22 = 0, b1 = 0, b2 = 0;
+  for (const p of rest) {
+    const ax = 2 * (p.x - p0.x), ay = 2 * (p.y - p0.y);
+    const rhs = p0.r ** 2 - p.r ** 2 + p.x ** 2 - p0.x ** 2 + p.y ** 2 - p0.y ** 2;
+    a11 += ax * ax; a12 += ax * ay; a22 += ay * ay; b1 += ax * rhs; b2 += ay * rhs;
+  }
+  const det = a11 * a22 - a12 * a12;
+  if (Math.abs(det) < 1e-9) return null;   // 앵커가 한 줄로 놓임
+  const x = (a22 * b1 - a12 * b2) / det, y = (a11 * b2 - a12 * b1) / det;
+  const resid = Math.sqrt(pts.reduce((acc, p) => acc + (Math.hypot(x - p.x, y - p.y) - p.r) ** 2, 0) / pts.length);
+  return { x, y, resid };
+}
+
+/* 원 2개가 만나는 점 (안 만나면 가장 가까운 점 하나) */
+function circleIntersections(a, c) {
+  const dx = c.x - a.x, dy = c.y - a.y, d = Math.hypot(dx, dy);
+  if (d < 1e-9) return [];
+  const l = (a.r * a.r - c.r * c.r + d * d) / (2 * d);
+  const h = Math.sqrt(Math.max(0, a.r * a.r - l * l));
+  const mx = a.x + l * dx / d, my = a.y + l * dy / d;
+  if (h === 0) return [{ x: mx, y: my }];
+  return [{ x: mx + h * dy / d, y: my - h * dx / d }, { x: mx - h * dy / d, y: my + h * dx / d }];
+}
+
+function drawMap(b) {
+  const cv = $(b.el, ".map canvas");
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (!W || !H) return;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  }
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  const C = { page: css("--page"), ink1: css("--ink-1"), ink3: css("--ink-3"), grid: css("--grid"), axis: css("--axis") };
+  const read = $(b.el, ".map-read .main"), cursor = $(b.el, ".map-read .cursor");
+  const now = Date.now() / 1000;
+
+  const pts = [...b.ablocks.keys()].sort().filter(a => Array.isArray(anchorPos[a]))
+    .map(a => ({ a, x: anchorPos[a][0], y: anchorPos[a][1], r: recentRange(b, a) }));
+  const meas = pts.filter(p => p.r != null);
+  let est = null, cands = [];
+  if (meas.length >= 3) est = solvePosition(meas);
+  else if (meas.length === 2) cands = circleIntersections(meas[0], meas[1]);
+  if (est) b.track.push({ t: now, x: est.x, y: est.y });
+  while (b.track.length && b.track[0].t < now - 10) b.track.shift();
+
+  // 보이는 범위: 앵커 + 원 + 추정 위치. 가로세로 같은 축척, 위가 +y
+  const xs = [], ys = [];
+  for (const p of pts) {
+    xs.push(p.x); ys.push(p.y);
+    if (p.r != null) { const r = Math.min(p.r, 15); xs.push(p.x - r, p.x + r); ys.push(p.y - r, p.y + r); }
+  }
+  for (const q of [est, ...cands]) if (q) { xs.push(q.x); ys.push(q.y); }
+  if (!xs.length) { read.textContent = "앵커 위치를 입력하면 지도가 나온다"; cursor.textContent = ""; return; }
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const pad = 28;
+  const s = Math.min((W - 2 * pad) / Math.max(maxX - minX, 0.5), (H - 2 * pad) / Math.max(maxY - minY, 0.5));
+  const cx = W / 2, cy = H / 2, mx = (minX + maxX) / 2, my = (minY + maxY) / 2;
+  const P = (x, y) => [cx + (x - mx) * s, cy - (y - my) * s];
+
+  // 격자 (1칸 = step m)
+  const step = niceStep(Math.max(maxX - minX, maxY - minY));
+  g.lineWidth = 1; g.strokeStyle = C.grid; g.fillStyle = C.ink3;
+  g.font = "11px system-ui, -apple-system, sans-serif";
+  const x0 = mx - (cx / s), x1 = mx + (W - cx) / s, y0 = my - (H - cy) / s, y1 = my + cy / s;
+  g.textAlign = "center"; g.textBaseline = "bottom";
+  for (let v = Math.ceil(x0 / step) * step; v <= x1; v += step) {
+    const [px] = P(v, 0); const X = Math.round(px) + 0.5;
+    g.beginPath(); g.moveTo(X, 0); g.lineTo(X, H); g.stroke();
+    g.fillText(`${+v.toFixed(2)}`, X, H - 3);
+  }
+  g.textAlign = "left"; g.textBaseline = "middle";
+  for (let v = Math.ceil(y0 / step) * step; v <= y1; v += step) {
+    const [, py] = P(0, v); const Y = Math.round(py) + 0.5;
+    g.beginPath(); g.moveTo(0, Y); g.lineTo(W, Y); g.stroke();
+    g.fillText(`${+v.toFixed(2)}`, 4, Y - 7);
+  }
+
+  // 거리 원 — 앵커 색, 선만 (겹쳐도 색이 탁해지지 않게)
+  g.lineWidth = 2;
+  for (const p of meas) {
+    const [px, py] = P(p.x, p.y);
+    g.strokeStyle = css(seriesVar(p.a));
+    g.beginPath(); g.arc(px, py, p.r * s, 0, Math.PI * 2); g.stroke();
+  }
+  // 앵커 — 앵커 색 네모 + 바탕색 테두리, 이름은 글자색
+  g.textAlign = "left"; g.textBaseline = "middle"; g.font = "600 12px system-ui, -apple-system, sans-serif";
+  for (const p of pts) {
+    const [px, py] = P(p.x, p.y);
+    g.fillStyle = C.page; g.fillRect(px - 7, py - 7, 14, 14);
+    g.fillStyle = css(seriesVar(p.a)); g.fillRect(px - 5, py - 5, 10, 10);
+    g.fillStyle = C.ink1; g.fillText(p.a + (p.r == null ? " (응답 없음)" : ""), px + 9, py - 9);
+  }
+  // 지나온 자리 → 추정 위치
+  g.fillStyle = C.ink3;
+  for (const q of b.track.slice(0, -1)) { const [px, py] = P(q.x, q.y); g.beginPath(); g.arc(px, py, 2, 0, Math.PI * 2); g.fill(); }
+  if (est) { const [px, py] = P(est.x, est.y); dot(g, px, py, C.ink1, C.page); }
+  g.strokeStyle = C.ink3; g.lineWidth = 2;
+  for (const q of cands) { const [px, py] = P(q.x, q.y); g.beginPath(); g.arc(px, py, 6, 0, Math.PI * 2); g.stroke(); }
+
+  // 읽기 줄
+  if (est) read.textContent = `태그 추정 위치  x ${est.x.toFixed(2)} m, y ${est.y.toFixed(2)} m  ·  원과 어긋난 정도 ±${(est.resid * 100).toFixed(1)} cm`;
+  else if (meas.length >= 3) read.textContent = "앵커 세 개가 한 줄로 놓여 위치를 계산할 수 없다 — 앵커 위치를 확인";
+  else if (cands.length) read.textContent = `앵커가 2개만 응답 — 후보 ${cands.length}곳: ` + cands.map(q => `(${q.x.toFixed(2)}, ${q.y.toFixed(2)})`).join(", ");
+  else read.textContent = meas.length ? "앵커가 1개만 응답 — 원 위 어딘가" : "응답하는 앵커 없음";
+  if (b.mapHover) {
+    const hx = mx + (b.mapHover.x - cx) / s, hy = my - (b.mapHover.y - cy) / s;
+    cursor.textContent = `커서 (${hx.toFixed(2)}, ${hy.toFixed(2)})`;
+  } else cursor.textContent = "";
+}
+
 function dot(g, x, y, fill, ring) {
   g.beginPath(); g.arc(x, y, 6, 0, Math.PI * 2); g.fillStyle = ring; g.fill();
   g.beginPath(); g.arc(x, y, 4, 0, Math.PI * 2); g.fillStyle = fill; g.fill();
@@ -743,8 +1030,8 @@ setInterval(() => {
   for (const b of boards.values()) {
     const live = b.state.status === "live";
     // 그래프가 시간에 따라 흐르고 '응답 없음'도 시간으로 정해지므로 매번 그린다
-    if (live && b.state.firmware === "tag") renderTag(b);
-    else if (live && b.state.firmware === "anchor") renderAnchor(b);
+    if (live && b.state.firmware === "anchor") renderAnchor(b);
+    if (live && showsDistances(b)) renderTag(b);
     if (b.logDirty) {
       $(b.el, ".log").textContent = b.logLines.join("\n");
       b.logDirty = false;

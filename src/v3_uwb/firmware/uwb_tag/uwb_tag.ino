@@ -6,14 +6,19 @@
  *
  * 출처: Makerfabs-ESP32-UWB-DW3000 example/range/range_rx (Qorvo ex_06a 기반)
  * 바꾼 것:
- *   - 번호(MY_ID): 앵커 A1, A2에게 번호를 붙여 차례로 묻는다 → 거리 2개가 섞이지 않는다
- *   - 태그 2개가 같은 순간에 말하지 않게 주기를 매번 조금씩 흔든다
+ *   - 번호(MY_ID): 앵커 A1, A2, A3에게 번호를 붙여 차례로 묻는다 → 앵커별 거리가 섞이지 않는다
+ *   - 태그를 여러 개 쓸 때 같은 순간에 말하지 않게 주기를 매번 조금씩 흔든다
  *   - 계속 답이 없는 앵커(꺼졌거나 멂)는 1초에 한 번만 다시 묻는다
  *   - "DIST: x.xx m" 대신 한 줄 CSV로 출력 → live_view.py가 그대로 저장
  *   - 수신 진단값(C, F1~F3, N, D)을 원시값으로 출력. dBm 환산과 가림 판정은 PC에서 한다
  *   - 실패(timeout·rx_err·bad_frame)도 한 줄씩 남긴다 → 가려졌을 때 성공률을 잴 수 있다
+ *   - 한 바퀴(A1→A2→A3)가 끝나면 결과를 UWB로 방송한다(report) → 컴퓨터에 꽂힌 앵커가 받아 출력한다.
+ *     그래서 태그는 전원만 있으면 되고 컴퓨터에 안 꽂아도 된다
  *
  * 무선 메시지 — uwb_anchor.ino 머리말 참고 (주소 2바이트 = 번호 글자 2개)
+ *   report    태그 -> 모두(FF FF). 머리 + E2 + 바퀴 번호 2 + 개수 1 + 앵커마다 28바이트 (+CRC 2, 최대 127바이트)
+ *             앵커 칸: 번호 2 | 결과 1 (0 성공 1 timeout 2 rx_err 3 bad_frame) | 거리 mm 4 | 시계 차이 ppm x100 2
+ *                      | C 4 | F1 4 | F2 4 | F3 4 | N 2 | D 1      (숫자는 작은 자리부터, little-endian)
  *
  * 출력 (115200bps):
  *   # uwb_tag id=T1 mac=.. ant_dly=.. period_ms=..             부팅 정보
@@ -33,11 +38,16 @@ extern SPISettings _fastSPI;
 // ======================================================
 // 보드마다 바꾸는 값 — 업로드 전에 확인
 // ======================================================
-#define MY_ID "T1"        // 첫 번째 태그 "T1", 두 번째 태그 "T2". 두 보드에 같은 번호를 넣으면 안 된다
+// 터미널에서는 코드를 안 고치고 번호를 넘길 수 있다: --build-property 'compiler.cpp.extra_flags=-DMY_ID="A2"' (docs/UWB_설명.txt 5절)
+#ifndef MY_ID
+#define MY_ID "T1"        // 태그 번호 "T1" (태그를 늘리면 "T2"…). 두 보드에 같은 번호를 넣으면 안 된다
+#endif
+#ifndef ANT_DLY
 #define ANT_DLY 16385     // 이 보드의 안테나 지연. 보정 전 기본값 16385 (보정값은 docs/UWB_설명.txt 2절 보드 목록)
+#endif
 
 // 차례로 물어볼 앵커 번호 (앵커 코드의 MY_ID와 같아야 한다)
-static const char *ANCHORS[] = {"A1", "A2"};
+static const char *ANCHORS[] = {"A1", "A2", "A3"};
 
 // ======================================================
 // Pin map — 보드 내부 배선 (ESP32 <-> DW3000). 바꾸지 말 것
@@ -50,7 +60,7 @@ static const char *ANCHORS[] = {"A1", "A2"};
 // Ranging — 앵커 코드와 반드시 같은 값이어야 하는 것들
 // ======================================================
 #define CYCLE_MS 100                     // 앵커 전부를 한 바퀴 묻는 주기 (10 Hz)
-#define JITTER_MS 15                     // 태그 2개가 같은 순간에 말하지 않게 주기를 매번 ±15 ms 흔든다
+#define JITTER_MS 15                     // 태그가 여러 개일 때 같은 순간에 말하지 않게 주기를 매번 ±15 ms 흔든다
 #define ABSENT_AFTER 10                  // 연속으로 이만큼 실패한 앵커는
 #define ABSENT_RETRY_MS 1000             //   이 간격으로만 다시 묻는다
 #define POLL_TX_TO_RESP_RX_DLY_UUS 600   // poll 보내고 이만큼 쉬었다가 수신기를 켠다 (앵커의 900과 짝)
@@ -58,6 +68,10 @@ static const char *ANCHORS[] = {"A1", "A2"};
 
 #define FUNC_POLL 0xE0
 #define FUNC_RESP 0xE1
+#define FUNC_REPORT 0xE2
+#define REPORT_HDR 13      // 머리 10 + 바퀴 번호 2 + 개수 1
+#define REPORT_ENTRY 28
+#define REPORT_MAX 4       // 13 + 4 x 28 + CRC 2 = 127바이트 (표준 프레임 한도)
 #define IDX_SEQ 2
 #define IDX_DST 5          // 받는 쪽 번호 2바이트
 #define IDX_SRC 7          // 보내는 쪽 번호 2바이트
@@ -98,6 +112,21 @@ static uint32_t fail_streak[N_ANCHORS] = {0};
 static uint32_t next_try_ms[N_ANCHORS] = {0};
 static dwt_rxdiag_t diag;
 
+// 이번 바퀴의 앵커별 결과 — 바퀴가 끝나면 report로 방송한다
+struct Result
+{
+  const char *anchor;
+  uint8_t code;          // 0 성공, 1 timeout, 2 rx_err, 3 bad_frame
+  int32_t dist_mm;
+  int16_t clk_x100;      // 시계 차이 ppm x 100
+  uint32_t C, F1, F2, F3;
+  uint16_t N;
+  uint8_t D;
+};
+static Result results[REPORT_MAX];
+static int n_results = 0;
+static uint16_t cycle = 0;
+
 static void halt(const char *msg)
 {
   Serial.printf("# FATAL %s\n", msg);
@@ -110,9 +139,53 @@ static bool same_id(const uint8_t *field, const char *id)
   return field[0] == (uint8_t)id[0] && field[1] == (uint8_t)id[1];
 }
 
-/* 앵커 하나에 한 번 묻고 결과를 한 줄 출력. 성공하면 true */
-static bool range_once(const char *anchor)
+static void put16(uint8_t *p, uint16_t v) { p[0] = v; p[1] = v >> 8; }
+static void put32(uint8_t *p, uint32_t v) { p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24; }
+
+/* 이번 바퀴 결과를 모두(FF FF)에게 한 번 방송한다. 답은 기다리지 않는다 */
+static void send_report()
 {
+  if (n_results == 0)
+    return;
+  uint8_t msg[REPORT_HDR + REPORT_MAX * REPORT_ENTRY] = {0x41, 0x88, 0, 0xCA, 0xDE, 0xFF, 0xFF};
+  msg[IDX_SEQ] = frame_seq_nb++;
+  msg[IDX_SRC] = MY_ID[0];
+  msg[IDX_SRC + 1] = MY_ID[1];
+  msg[IDX_FUNC] = FUNC_REPORT;
+  put16(&msg[10], cycle);
+  msg[12] = n_results;
+  for (int i = 0; i < n_results; i++)
+  {
+    const Result &r = results[i];
+    uint8_t *p = &msg[REPORT_HDR + i * REPORT_ENTRY];
+    p[0] = r.anchor[0];
+    p[1] = r.anchor[1];
+    p[2] = r.code;
+    put32(&p[3], (uint32_t)r.dist_mm);
+    put16(&p[7], (uint16_t)r.clk_x100);
+    put32(&p[9], r.C);
+    put32(&p[13], r.F1);
+    put32(&p[17], r.F2);
+    put32(&p[21], r.F3);
+    put16(&p[25], r.N);
+    p[27] = r.D;
+  }
+  uint16_t len = REPORT_HDR + n_results * REPORT_ENTRY;
+  dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_TXFRS_BIT_MASK);
+  dwt_writetxdata(len, msg, 0);
+  dwt_writetxfctrl(len + 2, 0, 0);
+  dwt_starttx(DWT_START_TX_IMMEDIATE);
+  while (!(dwt_read32bitreg(SYS_STATUS_ID) & SYS_STATUS_TXFRS_BIT_MASK))
+  {
+  };
+  dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_TXFRS_BIT_MASK);
+}
+
+/* 앵커 하나에 한 번 묻고 결과를 한 줄 출력하고 r에 담는다. 성공하면 true */
+static bool range_once(const char *anchor, Result *r)
+{
+  memset(r, 0, sizeof(*r));
+  r->anchor = anchor;
   uint8_t tx_poll[POLL_LEN - 2] = {0x41, 0x88, 0, 0xCA, 0xDE};   // CRC 2바이트는 칩이 붙인다
   tx_poll[IDX_SEQ] = frame_seq_nb;
   tx_poll[IDX_DST] = anchor[0];
@@ -138,8 +211,9 @@ static bool range_once(const char *anchor)
 
   if (!(status_reg & SYS_STATUS_RXFCG_BIT_MASK))
   {
-    const char *reason = (status_reg & SYS_STATUS_ALL_RX_TO) ? "timeout" : "rx_err";
-    Serial.printf("E,%lu,%lu,%s,%s,%s\n", (unsigned long)millis(), (unsigned long)seq, MY_ID, anchor, reason);
+    bool to = status_reg & SYS_STATUS_ALL_RX_TO;
+    r->code = to ? 1 : 2;
+    Serial.printf("E,%lu,%lu,%s,%s,%s\n", (unsigned long)millis(), (unsigned long)seq, MY_ID, anchor, to ? "timeout" : "rx_err");
     dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR);
     return false;
   }
@@ -155,6 +229,7 @@ static bool range_once(const char *anchor)
   }
   if (!ok)
   {
+    r->code = 3;
     Serial.printf("E,%lu,%lu,%s,%s,bad_frame\n", (unsigned long)millis(), (unsigned long)seq, MY_ID, anchor);
     return false;
   }
@@ -180,6 +255,16 @@ static bool range_once(const char *anchor)
                 (unsigned long)diag.ipatovPower, (unsigned long)diag.ipatovF1,
                 (unsigned long)diag.ipatovF2, (unsigned long)diag.ipatovF3,
                 (unsigned)diag.ipatovAccumCount, (unsigned)dgc);
+
+  r->code = 0;
+  r->dist_mm = (int32_t)lround(distance * 1000);
+  r->clk_x100 = (int16_t)lroundf(clockOffsetRatio * 1e6f * 100);
+  r->C = diag.ipatovPower;
+  r->F1 = diag.ipatovF1;
+  r->F2 = diag.ipatovF2;
+  r->F3 = diag.ipatovF3;
+  r->N = diag.ipatovAccumCount;
+  r->D = dgc;
   return true;
 }
 
@@ -231,16 +316,21 @@ void setup()
 void loop()
 {
   uint32_t start = millis();
+  n_results = 0;
+  cycle++;
   for (int i = 0; i < N_ANCHORS; i++)
   {
     /* 계속 실패하는 앵커(꺼졌거나 너무 멂)는 1초에 한 번만 다시 묻는다 */
     if (fail_streak[i] >= ABSENT_AFTER && (int32_t)(millis() - next_try_ms[i]) < 0)
       continue;
-    if (range_once(ANCHORS[i]))
+    Result dummy;
+    Result *r = n_results < REPORT_MAX ? &results[n_results++] : &dummy;   // 앵커가 4개를 넘으면 앞의 4개만 보고
+    if (range_once(ANCHORS[i], r))
       fail_streak[i] = 0;
     else if (++fail_streak[i] >= ABSENT_AFTER)
       next_try_ms[i] = millis() + ABSENT_RETRY_MS;
   }
+  send_report();
   int32_t wait = CYCLE_MS - (int32_t)(millis() - start) + (int32_t)random(-JITTER_MS, JITTER_MS + 1);
   if (wait > 0)
     delay(wait);

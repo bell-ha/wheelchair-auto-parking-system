@@ -4,8 +4,12 @@
   python3 tools/live_view.py --no-browser --http 8800
 
 보이는 것 (보드마다):
-  태그   현재 거리 · 최근 평균±표준편차 · 성공률 · 측정 속도 · RX−FP · 최근 30초 그래프
-  앵커   초당 응답 수
+  태그   앵커별 현재 거리 · 평균±표준편차 · 성공률 · RX−FP · 최근 30초 그래프
+         위에서 본 지도: 앵커마다 잰 거리만큼 원, 원이 만나는 곳 = 태그 추정 위치
+         (앵커 위치는 화면에서 입력, 브라우저에 저장. 계산은 화면에서만 하고 기록 CSV에는 거리만 남는다)
+  앵커   초당 응답 수. 태그가 방송한 결과를 받으면 태그와 같은 거리 화면도 나온다
+         '앵커끼리 거리 재기' 버튼 → 이 앵커에 SURVEY를 보내 앵커 사이 거리를 재고, 지도의 앵커 위치를 채운다
+         → 앵커 하나(A1)만 컴퓨터에 꽂아도 된다 (태그는 전원만)
   그 외  공장 테스트 펌웨어 등 — 원시 로그만
 
 새로 꽂은 보드는 2초 안에 자동으로 카드가 생긴다. 포트를 열 때 보드가 재부팅된다(부팅 메시지로 펌웨어 판별).
@@ -245,11 +249,13 @@ class Board(threading.Thread):
         self.firmware = "unknown"
         self.node_id = ""            # 펌웨어의 MY_ID (A1, T1 …) — 부팅 메시지에서 읽음
         self.mac = ""
+        self.last_tag = ""           # 측정 줄의 태그 번호. 앵커가 태그 결과를 전달하면 앵커 카드에서도 채워진다
         self.status = "connecting"   # connecting | live | error | released | unplugged
         self.error = ""
         self.held = True             # False면 포트를 놓는다 (업로드용)
         self.log = deque(maxlen=40)  # 측정 줄(R/E)이 아닌 것만
         self.recorder = None
+        self.ser = None              # 열려 있는 시리얼 (보드에 명령을 보낼 때 씀)
         self.lock = threading.Lock()
 
     def state(self):
@@ -263,12 +269,23 @@ class Board(threading.Thread):
             setattr(self, k, v)
         self.hub.publish(self.state())
 
+    def send(self, text):
+        """보드에 한 줄 명령을 보낸다 (예: 앵커에 SURVEY). 포트가 안 열려 있으면 False."""
+        s = self.ser
+        if s is None or self.status != "live":
+            return False
+        try:
+            s.write(text.encode())
+            return True
+        except PORT_ERRORS:
+            return False
+
     # ---- 기록 ----
     def start_record(self, truths, cond, target):
         with self.lock:
             if self.recorder:
                 self.recorder.close()
-            self.recorder = Recorder(self.node_id or self.label, truths, cond, target)
+            self.recorder = Recorder(self.last_tag or self.node_id or self.label, truths, cond, target)
         self.hub.publish(self.state())
 
     def stop_record(self, reason="stopped"):
@@ -302,6 +319,7 @@ class Board(threading.Thread):
                 time.sleep(3)
                 continue
             self._set(status="live", firmware="unknown", node_id="", mac="")
+            self.ser = s
             try:
                 self._read_loop(s)
             except PORT_ERRORS as e:
@@ -309,6 +327,7 @@ class Board(threading.Thread):
                 self._set(status="error", error=str(e))
                 time.sleep(1)
             finally:
+                self.ser = None
                 try:
                     s.close()
                 except PORT_ERRORS:
@@ -336,6 +355,20 @@ class Board(threading.Thread):
 
     def _handle(self, line):
         row = parse_line(line)
+        if row is None and line.startswith("S,"):
+            # 앵커끼리 측량 결과: S,ms,from,to,dist_m,n_ok,n_try
+            p = line.split(",")
+            try:
+                self.hub.publish({"type": "survey", "port": self.port, "from": p[2], "to": p[3],
+                                  "dist_m": float(p[4]), "n_ok": int(p[5]), "n_try": int(p[6])})
+            except (IndexError, ValueError):
+                pass
+            self.log.append(line)
+            self.hub.publish({"type": "log", "port": self.port, "line": line})
+            return
+        if row is None and line.startswith("# survey"):
+            # "# survey start" / "# survey done" / "# survey A2 no answer"
+            self.hub.publish({"type": "survey_status", "port": self.port, "text": line[2:]})
         if row is None:
             if line.startswith("# replies="):
                 # "# replies=19 per 1s (T1=10 T2=9)"
@@ -358,7 +391,10 @@ class Board(threading.Thread):
                 self.hub.publish({"type": "log", "port": self.port, "line": line})
             return
 
-        if self.firmware != "tag":   # 부팅 메시지를 놓쳤어도 측정 줄이 오면 태그다
+        # 측정 줄은 태그가 직접 보내거나, 앵커가 태그의 방송(report)을 받아 전달한다.
+        # 앵커가 전달하는 경우엔 앵커로 둔다. 부팅 메시지를 놓친 보드만 태그로 본다
+        self.last_tag = row["tag"]
+        if self.firmware not in ("tag", "anchor"):
             self.firmware = "tag"
             self.node_id = row["tag"]
             self.hub.publish(self.state())
@@ -463,8 +499,8 @@ def make_handler(hub):
             elif self.path == "/api/attach":
                 b.held = True
             elif self.path == "/api/record/start":
-                if b.firmware != "tag" or b.status != "live":
-                    return self._json(409, {"error": "태그 펌웨어가 돌고 있는 보드만 기록할 수 있음"})
+                if b.firmware not in ("tag", "anchor") or b.status != "live" or not b.last_tag:
+                    return self._json(409, {"error": "거리 결과가 들어오는 보드만 기록할 수 있음 (태그, 또는 태그 결과를 받는 앵커)"})
                 try:
                     # {"A1": 2.0, "A2": null} — 앵커 번호는 글자·숫자만
                     truths = {"".join(c for c in str(a) if c.isalnum())[:4]:
@@ -475,6 +511,9 @@ def make_handler(hub):
                     return self._json(400, {"error": "실제 거리·목표 개수는 숫자"})
                 cond = "".join(c for c in str(req.get("cond") or "los") if c.isalnum() or c in "_-") or "los"
                 b.start_record(truths, cond, target)
+            elif self.path == "/api/survey":
+                if b.firmware != "anchor" or not b.send("SURVEY\n"):
+                    return self._json(409, {"error": "측량은 컴퓨터에 꽂힌 앵커(uwb_anchor)에서만 시작할 수 있음"})
             elif self.path == "/api/record/stop":
                 b.stop_record("stopped")
             else:
