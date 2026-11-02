@@ -231,9 +231,9 @@
         <p class="map-read"><span class="main"></span><span class="cursor"></span></p>
         <div class="key"></div>
         <details class="map-setup">
-          <summary>앵커 위치 입력 (m, 줄자로 잰 값)</summary>
+          <summary>앵커 위치·높이, 태그 높이 (m)</summary>
           <div class="pos-grid"></div>
-          <p class="hint">이 브라우저에 저장된다. 위에서 본 2D라 높이 차이는 무시한다 (높이가 다르면 원이 실제보다 크다).</p>
+          <p class="hint">h = 바닥에서 안테나 중심까지 높이. 높이를 넣으면 잰 거리를 수평거리로 바꿔 계산한다. 앵커 x·y는 측량 버튼으로도 채워진다. data/layout.json에 저장된다.</p>
         </details>
       </div>
 
@@ -334,6 +334,16 @@ function setConn(kind, text) {
 function handle(ev) {
   if (ev.type === "snapshot") {
     for (const b of ev.boards) upsert(b);
+    if (ev.layout) setLayout(ev.layout);
+  } else if (ev.type === "layout") {
+    setLayout(ev);
+  } else if (ev.type === "position") {
+    const b = boards.get(ev.port); if (!b) return;
+    b.pos = ev;
+    if (ev.x != null) b.track.push({ t: ev.t, x: ev.x, y: ev.y });
+  } else if (ev.type === "survey_result") {
+    const b = boards.get(ev.port); if (!b) return;
+    b.surveyMsg = ev.msg; renderSurvey(b);
   } else if (ev.type === "board") {
     upsert(ev);
   } else if (ev.type === "sample") {
@@ -363,7 +373,7 @@ function handle(ev) {
     const noAns = ev.text.match(/^survey (\S+) no answer/);
     if (ev.text.startsWith("survey start")) { b.surveyPairs = {}; b.surveyWarn = []; b.surveyMsg = "측량 중…"; }
     else if (noAns) (b.surveyWarn = b.surveyWarn || []).push(`${noAns[1]}가 결과를 보내지 않음 (전원·펌웨어 확인)`);
-    else if (ev.text.startsWith("survey done")) b.surveyMsg = applySurvey(b);
+    else if (ev.text.startsWith("survey done")) b.surveyMsg = "앵커 위치 계산 중…";
     renderSurvey(b);
   } else if (ev.type === "record") {
     const b = boards.get(ev.port); if (!b) return;
@@ -460,32 +470,7 @@ function ensureAnchor(b, anchor) {
   x.append(xb, document.createTextNode("측정 실패 (앵커별 줄)"));
   key.append(ref, x);
 
-  // 앵커 위치 입력칸 (번호 순서)
-  const grid = $(b.el, ".pos-grid");
-  grid.replaceChildren();
-  for (const a of [...b.ablocks.keys()].sort()) {
-    const lab = document.createElement("label");
-    const k = document.createElement("i"); k.className = "sq"; k.style.background = `var(${seriesVar(a)})`;
-    lab.append(k, document.createTextNode(` ${a}  x`));
-    for (const axis of [0, 1]) {
-      if (axis === 1) lab.append(document.createTextNode(" y"));
-      const inp = document.createElement("input");
-      inp.type = "number"; inp.step = "0.01";
-      inp.dataset.anchor = a; inp.dataset.axis = axis;
-      const pos = anchorPos[a];
-      if (pos) inp.value = pos[axis];
-      inp.addEventListener("input", () => {
-        const v = parseFloat(inp.value);
-        if (Number.isNaN(v)) return;
-        anchorPos[a] = anchorPos[a] ? anchorPos[a].slice() : [0, 0];
-        anchorPos[a][axis] = v;
-        savePos();
-        for (const ob of boards.values()) ob.track = [];   // 좌표가 바뀌면 지나온 자리는 의미가 없다
-      });
-      lab.append(inp);
-    }
-    grid.appendChild(lab);
-  }
+  buildLayoutInputs(b);
 
   // 지도 범례
   const mk = $(b.el, ".map .key");
@@ -867,70 +852,66 @@ function renderSurvey(b) {
   }));
 }
 
-/* A1-A2, A1-A3, A2-A3 거리 → 앵커 좌표. A1 원점, A2는 +x축, A3는 위쪽(+y) */
-function applySurvey(b) {
-  const get = k => { const e = (b.surveyPairs || {})[k]; return e && e.n_ok > 0 && e.dist_m > 0 ? e.dist_m : null; };
-  const d12 = get("A1-A2"), d13 = get("A1-A3"), d23 = get("A2-A3");
-  if (d12 == null || d13 == null || d23 == null) return "세 거리가 다 나오지 않아 앵커 위치를 계산하지 못했다";
-  const x = (d12 * d12 + d13 * d13 - d23 * d23) / (2 * d12);
-  const y2 = d13 * d13 - x * x;
-  if (y2 < -0.0025) return "세 거리로 삼각형이 안 만들어진다 — 어느 한 거리가 틀렸다 (가림·반사 확인)";
-  anchorPos.A1 = [0, 0];
-  anchorPos.A2 = [+d12.toFixed(3), 0];
-  anchorPos.A3 = [+x.toFixed(3), +Math.sqrt(Math.max(0, y2)).toFixed(3)];
-  savePos();
+// ---------------- 배치 (앵커 x·y·높이, 태그 높이) — 서버의 data/layout.json ----------------
+let layout = { anchors: {}, tags: {} };
+
+function setLayout(l) {
+  const before = JSON.stringify(layout.anchors);
+  layout = { anchors: l.anchors || {}, tags: l.tags || {} };
+  if (JSON.stringify(layout.anchors) !== before) for (const b of boards.values()) b.track = [];  // 좌표가 바뀌면 지나온 자리는 의미 없음
   for (const inp of document.querySelectorAll(".pos-grid input")) {
-    const pos = anchorPos[inp.dataset.anchor];
-    if (pos) inp.value = pos[+inp.dataset.axis];
+    if (inp === document.activeElement) continue;   // 입력 중인 칸은 건드리지 않는다
+    const v = (layout[inp.dataset.kind][inp.dataset.key] || {})[inp.dataset.field];
+    inp.value = v == null ? "" : v;
   }
-  for (const ob of boards.values()) ob.track = [];
-  return "측량 끝 — 지도의 앵커 위치를 채웠다 (A1 원점, A2는 x축 위, A3는 위쪽)";
+}
+
+let layoutTimer = null, layoutPending = { anchors: {}, tags: {} };
+function queueLayout(kind, key, field, value) {
+  ((layoutPending[kind][key] = layoutPending[kind][key] || {}))[field] = value;
+  clearTimeout(layoutTimer);
+  layoutTimer = setTimeout(() => {
+    const body = layoutPending; layoutPending = { anchors: {}, tags: {} };
+    fetch("/api/layout", { method: "POST", headers: { "Content-Type": "application/json", "X-UWB": "1" }, body: JSON.stringify(body) })
+      .catch(e => alert("배치를 저장하지 못함: " + e));
+  }, 400);
+}
+
+function layoutInput(kind, key, field) {
+  const inp = document.createElement("input");
+  inp.type = "number"; inp.step = "0.01";
+  Object.assign(inp.dataset, { kind, key, field });
+  const v = (layout[kind][key] || {})[field];
+  if (v != null) inp.value = v;
+  inp.addEventListener("input", () => {
+    const v = parseFloat(inp.value);
+    if (!Number.isNaN(v)) queueLayout(kind, key, field, v);
+  });
+  return inp;
+}
+
+/* 앵커마다 x · y · h, 그리고 이 카드에 보이는 태그의 h */
+function buildLayoutInputs(b) {
+  const grid = $(b.el, ".pos-grid");
+  grid.replaceChildren();
+  for (const a of [...b.ablocks.keys()].sort()) {
+    const lab = document.createElement("label");
+    const k = document.createElement("i"); k.className = "sq"; k.style.background = `var(${seriesVar(a)})`;
+    lab.append(k, document.createTextNode(` ${a}  x`), layoutInput("anchors", a, "x"),
+      document.createTextNode(" y"), layoutInput("anchors", a, "y"),
+      document.createTextNode(" h"), layoutInput("anchors", a, "h"));
+    grid.appendChild(lab);
+  }
+  const last = b.samples[b.samples.length - 1];
+  if (last && last.tag) {
+    const lab = document.createElement("label");
+    const k = document.createElement("i"); k.className = "pt";
+    lab.append(k, document.createTextNode(` 태그 ${last.tag}  h`), layoutInput("tags", last.tag, "h"));
+    grid.appendChild(lab);
+  }
 }
 
 // ---------------- 위에서 본 지도 ----------------
-// 앵커 위치 (m). 줄자로 잰 값을 화면에서 입력 → 이 브라우저에 저장. 처음엔 2 m 삼각형으로 둔다
-const POS_KEY = "uwb.anchorPos";
-const anchorPos = Object.assign({ A1: [0, 0], A2: [2, 0], A3: [0, 2] }, (() => {
-  try { return JSON.parse(localStorage.getItem(POS_KEY)) || {}; } catch (e) { return {}; }
-})());
-function savePos() {
-  try { localStorage.setItem(POS_KEY, JSON.stringify(anchorPos)); } catch (e) { /* 저장 못 해도 화면은 동작 */ }
-}
-
-/* 앵커까지 최근 거리: 1.5초 안의 성공값 최근 5개의 중앙값 (튀는 값 하나에 원이 흔들리지 않게) */
-function recentRange(b, anchor) {
-  const now = Date.now() / 1000;
-  const d = b.samples.filter(s => s.anchor === anchor && s.ok && s.t > now - 1.5).slice(-5).map(s => s.dist_m).sort((x, y) => x - y);
-  return d.length ? d[Math.floor(d.length / 2)] : null;
-}
-
-/* 원 3개 이상: 원 방정식끼리 빼서 만든 직선 방정식을 최소제곱으로 푼다 */
-function solvePosition(pts) {
-  const [p0, ...rest] = pts;
-  let a11 = 0, a12 = 0, a22 = 0, b1 = 0, b2 = 0;
-  for (const p of rest) {
-    const ax = 2 * (p.x - p0.x), ay = 2 * (p.y - p0.y);
-    const rhs = p0.r ** 2 - p.r ** 2 + p.x ** 2 - p0.x ** 2 + p.y ** 2 - p0.y ** 2;
-    a11 += ax * ax; a12 += ax * ay; a22 += ay * ay; b1 += ax * rhs; b2 += ay * rhs;
-  }
-  const det = a11 * a22 - a12 * a12;
-  if (Math.abs(det) < 1e-9) return null;   // 앵커가 한 줄로 놓임
-  const x = (a22 * b1 - a12 * b2) / det, y = (a11 * b2 - a12 * b1) / det;
-  const resid = Math.sqrt(pts.reduce((acc, p) => acc + (Math.hypot(x - p.x, y - p.y) - p.r) ** 2, 0) / pts.length);
-  return { x, y, resid };
-}
-
-/* 원 2개가 만나는 점 (안 만나면 가장 가까운 점 하나) */
-function circleIntersections(a, c) {
-  const dx = c.x - a.x, dy = c.y - a.y, d = Math.hypot(dx, dy);
-  if (d < 1e-9) return [];
-  const l = (a.r * a.r - c.r * c.r + d * d) / (2 * d);
-  const h = Math.sqrt(Math.max(0, a.r * a.r - l * l));
-  const mx = a.x + l * dx / d, my = a.y + l * dy / d;
-  if (h === 0) return [{ x: mx, y: my }];
-  return [{ x: mx + h * dy / d, y: my - h * dx / d }, { x: mx - h * dy / d, y: my + h * dx / d }];
-}
-
 function drawMap(b) {
   const cv = $(b.el, ".map canvas");
   const dpr = window.devicePixelRatio || 1;
@@ -946,13 +927,15 @@ function drawMap(b) {
   const read = $(b.el, ".map-read .main"), cursor = $(b.el, ".map-read .cursor");
   const now = Date.now() / 1000;
 
-  const pts = [...b.ablocks.keys()].sort().filter(a => Array.isArray(anchorPos[a]))
-    .map(a => ({ a, x: anchorPos[a][0], y: anchorPos[a][1], r: recentRange(b, a) }));
+  // 계산은 서버(live_view.py '위치 계산')가 한다. 여기선 그리기만
+  const pos = b.pos && now - b.pos.t < 2 ? b.pos : null;
+  const ranges = (pos && pos.ranges) || {};
+  const pts = Object.keys(layout.anchors).sort().filter(a => b.ablocks.has(a))
+    .map(a => ({ a, x: layout.anchors[a].x, y: layout.anchors[a].y, r: ranges[a] ? ranges[a].r : null,
+      close: ranges[a] && ranges[a].close }));
   const meas = pts.filter(p => p.r != null);
-  let est = null, cands = [];
-  if (meas.length >= 3) est = solvePosition(meas);
-  else if (meas.length === 2) cands = circleIntersections(meas[0], meas[1]);
-  if (est) b.track.push({ t: now, x: est.x, y: est.y });
+  const est = pos && pos.x != null ? { x: pos.x, y: pos.y, resid: pos.resid } : null;
+  const cands = pos ? (pos.cands || []).map(([x, y]) => ({ x, y })) : [];
   while (b.track.length && b.track[0].t < now - 10) b.track.shift();
 
   // 보이는 범위: 앵커 + 원 + 추정 위치. 가로세로 같은 축척, 위가 +y
@@ -1011,9 +994,11 @@ function drawMap(b) {
 
   // 읽기 줄
   if (est) read.textContent = `태그 추정 위치  x ${est.x.toFixed(2)} m, y ${est.y.toFixed(2)} m  ·  원과 어긋난 정도 ±${(est.resid * 100).toFixed(1)} cm`;
-  else if (meas.length >= 3) read.textContent = "앵커 세 개가 한 줄로 놓여 위치를 계산할 수 없다 — 앵커 위치를 확인";
+  else if (pos && pos.status === "collinear") read.textContent = "앵커 세 개가 한 줄로 놓여 위치를 계산할 수 없다 — 앵커 위치를 확인";
   else if (cands.length) read.textContent = `앵커가 2개만 응답 — 후보 ${cands.length}곳: ` + cands.map(q => `(${q.x.toFixed(2)}, ${q.y.toFixed(2)})`).join(", ");
   else read.textContent = meas.length ? "앵커가 1개만 응답 — 원 위 어딘가" : "응답하는 앵커 없음";
+  const close = meas.filter(p => p.close).map(p => p.a);
+  if (close.length) read.textContent += `  ·  ${close.join(", ")}: 잰 거리가 높이차보다 짧아 수평거리 0으로 둠 (높이 확인)`;
   if (b.mapHover) {
     const hx = mx + (b.mapHover.x - cx) / s, hy = my - (b.mapHover.y - cy) / s;
     cursor.textContent = `커서 (${hx.toFixed(2)}, ${hy.toFixed(2)})`;

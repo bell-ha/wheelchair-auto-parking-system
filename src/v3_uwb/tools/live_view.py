@@ -8,7 +8,11 @@
          위에서 본 지도: 앵커마다 잰 거리만큼 원, 원이 만나는 곳 = 태그 추정 위치
          (앵커 위치는 화면에서 입력, 브라우저에 저장. 계산은 화면에서만 하고 기록 CSV에는 거리만 남는다)
   앵커   초당 응답 수. 태그가 방송한 결과를 받으면 태그와 같은 거리 화면도 나온다
-         '앵커끼리 거리 재기' 버튼 → 이 앵커에 SURVEY를 보내 앵커 사이 거리를 재고, 지도의 앵커 위치를 채운다
+         '앵커끼리 거리 재기' 버튼 → 이 앵커에 SURVEY를 보내 앵커 사이 거리를 재고, 앵커 위치를 계산한다
+
+위치 계산 (이 파일의 '위치 계산' 구역):
+  앵커 x·y·높이와 태그 높이(data/layout.json, 화면에서 입력) → 잰 거리를 수평거리로 바꿔 원 3개로 태그 위치를 푼다.
+  결과는 화면 지도에 보이고, 기록 CSV의 pos_x·pos_y·pos_resid 열에도 남는다.
          → 앵커 하나(A1)만 컴퓨터에 꽂아도 된다 (태그는 전원만)
   그 외  공장 테스트 펌웨어 등 — 원시 로그만
 
@@ -56,7 +60,8 @@ BAUD = 115200
 V3_DIR = HERE.parent
 RECORD_DIR = V3_DIR / "data"
 CSV_FIELDS = ["t_pc", "ms", "seq", "tag", "anchor", "ok", "dist_m", "clk_ppm",
-              "C", "F1", "F2", "F3", "N", "D", "reason", "true_m", "cond"]
+              "C", "F1", "F2", "F3", "N", "D", "reason", "true_m", "cond",
+              "pos_x", "pos_y", "pos_resid"]   # 그 순간 태그 추정 위치 (앵커 3개 이상 응답할 때)
 
 
 def record_csv_path(cond, tag, truths):
@@ -148,6 +153,133 @@ def levels(row):
 
 
 # ======================================================
+# 위치 계산 — 앵커 배치(x, y, 높이)와 태그 높이로 잰 거리를 수평거리로 바꿔 태그 위치를 푼다
+#   UWB 거리는 안테나끼리 직선거리라 높이차가 섞여 있다: 수평거리 = √(잰 거리² − 높이차²)
+#   앵커 배치는 화면에서 입력하거나 측량 버튼으로 채우고 data/layout.json에 저장한다
+# ======================================================
+LAYOUT_PATH = RECORD_DIR / "layout.json"
+DEFAULT_LAYOUT = {"anchors": {"A1": {"x": 0.0, "y": 0.0, "h": 0.0},
+                              "A2": {"x": 2.0, "y": 0.0, "h": 0.0},
+                              "A3": {"x": 0.0, "y": 2.0, "h": 0.0}},
+                  "tags": {}}   # 예: {"T1": {"h": 0.4}}
+RANGE_WINDOW_S = 1.5            # 위치에 쓰는 거리: 이 시간 안의 성공값
+RANGE_MEDIAN_N = 5              #   최근 이만큼의 중앙값 (튀는 값 하나에 흔들리지 않게)
+
+
+class Layout:
+    """앵커 x·y·높이와 태그 높이 (m, 바닥 기준·안테나 중심). 바꾸면 바로 파일에 저장."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        try:
+            self.data = json.loads(LAYOUT_PATH.read_text(encoding="utf8"))
+        except (OSError, ValueError):
+            self.data = json.loads(json.dumps(DEFAULT_LAYOUT))
+
+    def get(self):
+        with self.lock:
+            return json.loads(json.dumps(self.data))
+
+    def update(self, anchors=None, tags=None):
+        with self.lock:
+            for kind, new in (("anchors", anchors), ("tags", tags)):
+                for k, v in (new or {}).items():
+                    self.data.setdefault(kind, {}).setdefault(k, {}).update(v)
+            RECORD_DIR.mkdir(parents=True, exist_ok=True)
+            LAYOUT_PATH.write_text(json.dumps(self.data, ensure_ascii=False, indent=1), encoding="utf8")
+        return self.get()
+
+    def from_survey(self, pairs):
+        """앵커끼리 잰 거리 {"A1-A2": m, ...} → 앵커 x, y (A1 원점, A2는 +x축, A3는 위쪽). 높이는 그대로.
+        성공하면 (True, 메시지), 아니면 (False, 이유)."""
+        lay = self.get()["anchors"]
+        h = {a: lay.get(a, {}).get("h", 0.0) for a in ("A1", "A2", "A3")}
+        try:
+            d12 = horizontal(pairs["A1-A2"], h["A1"] - h["A2"])
+            d13 = horizontal(pairs["A1-A3"], h["A1"] - h["A3"])
+            d23 = horizontal(pairs["A2-A3"], h["A2"] - h["A3"])
+        except KeyError:
+            return False, "세 거리가 다 나오지 않아 앵커 위치를 계산하지 못했다"
+        if d12 <= 0:
+            return False, "A1–A2 수평거리가 0 — 높이 입력을 확인"
+        x = (d12 * d12 + d13 * d13 - d23 * d23) / (2 * d12)
+        y2 = d13 * d13 - x * x
+        if y2 < -0.0025:
+            return False, "세 거리로 삼각형이 안 만들어진다 — 어느 한 거리가 틀렸다 (가림·반사 확인)"
+        self.update(anchors={"A1": {"x": 0.0, "y": 0.0}, "A2": {"x": round(d12, 3), "y": 0.0},
+                             "A3": {"x": round(x, 3), "y": round(math.sqrt(max(0.0, y2)), 3)}})
+        return True, "측량 끝 — 앵커 위치를 채웠다 (A1 원점, A2는 x축 위, A3는 위쪽, 높이차 보정함)"
+
+
+def horizontal(d, dh):
+    """잰 직선거리 d, 높이차 dh → 수평거리. 측정 오차로 d가 높이차보다 짧으면 0."""
+    v = d * d - dh * dh
+    return math.sqrt(v) if v > 0 else 0.0
+
+
+def solve_position(pts):
+    """원 3개 이상 [(x, y, r)] → (x, y, 어긋난 정도). 원 방정식끼리 빼서 만든 직선 방정식을 최소제곱으로 푼다.
+    앵커가 한 줄로 놓였으면 None."""
+    (x0, y0, r0), rest = pts[0], pts[1:]
+    a11 = a12 = a22 = b1 = b2 = 0.0
+    for x, y, r in rest:
+        ax, ay = 2 * (x - x0), 2 * (y - y0)
+        rhs = r0 * r0 - r * r + x * x - x0 * x0 + y * y - y0 * y0
+        a11 += ax * ax; a12 += ax * ay; a22 += ay * ay; b1 += ax * rhs; b2 += ay * rhs
+    det = a11 * a22 - a12 * a12
+    if abs(det) < 1e-9:
+        return None
+    px, py = (a22 * b1 - a12 * b2) / det, (a11 * b2 - a12 * b1) / det
+    resid = math.sqrt(sum((math.hypot(px - x, py - y) - r) ** 2 for x, y, r in pts) / len(pts))
+    return px, py, resid
+
+
+def circle_intersections(a, c):
+    """원 2개 (x, y, r)가 만나는 점들 (안 만나면 가장 가까운 점 하나)."""
+    (ax, ay, ar), (cx, cy, cr) = a, c
+    dx, dy = cx - ax, cy - ay
+    d = math.hypot(dx, dy)
+    if d < 1e-9:
+        return []
+    l = (ar * ar - cr * cr + d * d) / (2 * d)
+    hh = math.sqrt(max(0.0, ar * ar - l * l))
+    mx, my = ax + l * dx / d, ay + l * dy / d
+    if hh == 0:
+        return [(mx, my)]
+    return [(mx + hh * dy / d, my - hh * dx / d), (mx - hh * dy / d, my + hh * dx / d)]
+
+
+def estimate(layout, tag, ranges):
+    """ranges: {앵커: 잰 거리} → 화면·기록에 쓰는 위치 결과 dict."""
+    anchors = layout["anchors"]
+    tag_h = layout.get("tags", {}).get(tag, {}).get("h", 0.0)
+    used, info = [], {}
+    for a in sorted(ranges):
+        if a not in anchors:
+            continue
+        d, an = ranges[a], anchors[a]
+        dh = tag_h - an.get("h", 0.0)
+        r = horizontal(d, dh)
+        info[a] = {"d": round(d, 3), "r": round(r, 3), "close": d <= abs(dh)}
+        used.append((an["x"], an["y"], r))
+    out = {"tag": tag, "ranges": info, "x": None, "y": None, "resid": None, "cands": [], "status": "none"}
+    if len(used) >= 3:
+        sol = solve_position(used)
+        if sol is None:
+            out["status"] = "collinear"
+        else:
+            out.update(x=round(sol[0], 3), y=round(sol[1], 3), resid=round(sol[2], 3), status="ok")
+    elif len(used) == 2:
+        out.update(cands=[[round(x, 3), round(y, 3)] for x, y in circle_intersections(*used)], status="two")
+    elif len(used) == 1:
+        out["status"] = "one"
+    return out
+
+
+LAYOUT = Layout()
+
+
+# ======================================================
 # 화면 서버
 # ======================================================
 
@@ -196,7 +328,7 @@ class Hub:
     def snapshot(self):
         with self.lock:
             boards = list(self.boards.values())
-        return {"type": "snapshot", "boards": [b.state() for b in boards]}
+        return {"type": "snapshot", "boards": [b.state() for b in boards], "layout": LAYOUT.get()}
 
 
 class Recorder:
@@ -256,6 +388,9 @@ class Board(threading.Thread):
         self.log = deque(maxlen=40)  # 측정 줄(R/E)이 아닌 것만
         self.recorder = None
         self.ser = None              # 열려 있는 시리얼 (보드에 명령을 보낼 때 씀)
+        self.ranges = {}             # (태그, 앵커) → 최근 성공 거리 deque[(시각, m)]
+        self.last_pos_pub = 0.0
+        self.survey = {}             # 측량 중 받은 앵커끼리 거리 {"A1-A2": m}
         self.lock = threading.Lock()
 
     def state(self):
@@ -361,6 +496,8 @@ class Board(threading.Thread):
             try:
                 self.hub.publish({"type": "survey", "port": self.port, "from": p[2], "to": p[3],
                                   "dist_m": float(p[4]), "n_ok": int(p[5]), "n_try": int(p[6])})
+                if int(p[5]) > 0 and float(p[4]) > 0:
+                    self.survey["-".join(sorted((p[2], p[3])))] = float(p[4])
             except (IndexError, ValueError):
                 pass
             self.log.append(line)
@@ -369,6 +506,13 @@ class Board(threading.Thread):
         if row is None and line.startswith("# survey"):
             # "# survey start" / "# survey done" / "# survey A2 no answer"
             self.hub.publish({"type": "survey_status", "port": self.port, "text": line[2:]})
+            if line.startswith("# survey start"):
+                self.survey = {}
+            elif line.startswith("# survey done"):
+                ok, msg = LAYOUT.from_survey(self.survey)
+                self.hub.publish({"type": "survey_result", "port": self.port, "ok": ok, "msg": msg})
+                if ok:
+                    self.hub.publish({"type": "layout", **LAYOUT.get()})
         if row is None:
             if line.startswith("# replies="):
                 # "# replies=19 per 1s (T1=10 T2=9)"
@@ -398,6 +542,22 @@ class Board(threading.Thread):
             self.firmware = "tag"
             self.node_id = row["tag"]
             self.hub.publish(self.state())
+        now = time.time()
+        if row["ok"]:
+            q = self.ranges.setdefault((row["tag"], row["anchor"]), deque(maxlen=RANGE_MEDIAN_N))
+            q.append((now, row["dist_m"]))
+        recent = {}
+        for (tag, anchor), q in self.ranges.items():
+            vals = sorted(d for t, d in q if tag == row["tag"] and t > now - RANGE_WINDOW_S)
+            if vals:
+                recent[anchor] = vals[len(vals) // 2]
+        pos = estimate(LAYOUT.get(), row["tag"], recent)
+        row = dict(row, pos_x=pos["x"] if pos["x"] is not None else "",
+                   pos_y=pos["y"] if pos["y"] is not None else "",
+                   pos_resid=pos["resid"] if pos["resid"] is not None else "")
+        if now - self.last_pos_pub >= 0.1:
+            self.last_pos_pub = now
+            self.hub.publish({"type": "position", "port": self.port, "t": now, **pos})
         rx, fp, dfp = levels(row) if row["ok"] else (None, None, None)
         self.hub.publish({"type": "sample", "port": self.port, "t": time.time(),
                           "tag": row["tag"], "anchor": row["anchor"],
@@ -489,6 +649,19 @@ def make_handler(hub):
                 req = json.loads(self.rfile.read(n) or b"{}")
             except ValueError:
                 return self._json(400, {"error": "bad json"})
+            if self.path == "/api/layout":
+                # {"anchors": {"A1": {"x": .., "y": .., "h": ..}}, "tags": {"T1": {"h": ..}}} — 바꿀 칸만 보내도 된다
+                try:
+                    clean = {}
+                    for kind in ("anchors", "tags"):
+                        clean[kind] = {"".join(c for c in str(k) if c.isalnum())[:4]:
+                                       {f: float(v) for f, v in (vals or {}).items() if f in ("x", "y", "h")}
+                                       for k, vals in (req.get(kind) or {}).items()}
+                except (TypeError, ValueError, AttributeError):
+                    return self._json(400, {"error": "위치·높이는 숫자"})
+                lay = LAYOUT.update(**clean)
+                hub.publish({"type": "layout", **lay})
+                return self._json(200, lay)
             with hub.lock:
                 b = hub.boards.get(req.get("port"))
             if b is None:
